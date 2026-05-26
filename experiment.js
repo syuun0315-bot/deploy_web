@@ -213,49 +213,78 @@ function completeLearningStage() {
     }
 }
 
-function setupReviewInstructionNextDelay() {
+function resetReviewInstructionNextButton() {
     const btn = document.getElementById('review-instruction-next-btn');
     if (!btn) return;
 
     clearStageDelayTimer('reviewInstructionNext');
     delete sessionState.stageDelayUnlockAt?.reviewInstructionNext;
+    btn.disabled = false;
+    btn.textContent = '다음';
+}
 
-    if (experimentData.condition !== 1) {
-        btn.disabled = false;
-        btn.textContent = '다음';
-        return;
-    }
+function syncReviewNextStepDockVisibility() {
+    const dock = document.getElementById('review-next-step-dock');
+    const btn = document.getElementById('review-to-survey-btn');
+    const hintEl = document.getElementById('review-next-step-dock-hint');
+    if (!dock) return;
 
-    btn.disabled = true;
-    scheduleStageDelay(
-        'reviewInstructionNext',
-        60000,
-        () => {
-            btn.disabled = false;
-            btn.textContent = '다음';
-        },
-        (remainingSec) => {
-            btn.textContent = `다음 (${remainingSec}초)`;
+    const condition = experimentData.condition;
+    const showDock = currentStage === 'review' && (condition === 1 || condition === 3);
+
+    dock.hidden = !showDock;
+    if (!showDock) {
+        if (btn) btn.hidden = true;
+        if (hintEl) {
+            hintEl.textContent = '';
+            hintEl.hidden = true;
         }
-    );
+    }
 }
 
 function setupReviewToSurveyDelay() {
     const btn = document.getElementById('review-to-survey-btn');
+    const hintEl = document.getElementById('review-next-step-dock-hint');
     if (!btn) return;
 
     clearStageDelayTimer('reviewToSurvey');
     delete sessionState.stageDelayUnlockAt?.reviewToSurvey;
-    btn.style.display = 'none';
 
     const condition = experimentData.condition;
-    if (condition !== 1 && condition !== 3) return;
+    if (condition !== 1 && condition !== 3) {
+        syncReviewNextStepDockVisibility();
+        btn.hidden = true;
+        btn.disabled = false;
+        btn.textContent = '다음 단계';
+        return;
+    }
 
-    scheduleStageDelay('reviewToSurvey', 60000, () => {
-        if (currentStage === 'review') {
-            btn.style.display = 'inline-block';
+    syncReviewNextStepDockVisibility();
+    btn.hidden = false;
+    btn.disabled = true;
+    btn.textContent = '다음 단계 (60초)';
+    if (hintEl) {
+        hintEl.textContent = '최소 1분 이상 복습한 뒤 진행할 수 있습니다.';
+        hintEl.hidden = false;
+    }
+
+    scheduleStageDelay(
+        'reviewToSurvey',
+        60000,
+        () => {
+            if (currentStage !== 'review') return;
+            btn.disabled = false;
+            btn.textContent = '다음 단계';
+            if (hintEl) {
+                hintEl.textContent = '';
+                hintEl.hidden = true;
+            }
+        },
+        (remainingSec) => {
+            if (currentStage !== 'review') return;
+            btn.textContent = `다음 단계 (${remainingSec}초)`;
         }
-    });
+    );
 }
 
 const REQUIRED_RESPONSE_ALERT_MSG = '빈 부분을 모두 응답해 주세요.';
@@ -1212,32 +1241,13 @@ function showStage(stage) {
             updateDesignerInfo();
         }
 
-        const reviewStageBar = document.getElementById('review-stage-bar');
-        const reviewToSurveyBtn = document.getElementById('review-to-survey-btn');
-        if (reviewStageBar && stage !== 'review') {
-            reviewStageBar.style.display = 'none';
-            if (reviewToSurveyBtn) reviewToSurveyBtn.style.display = 'none';
-        }
+        syncReviewNextStepDockVisibility();
     }
     syncLearningTimerFloatVisibility(stage);
 }
 
 function updateReviewStageBar() {
-    const bar = document.getElementById('review-stage-bar');
-    const hintEl = document.getElementById('review-stage-bar-hint');
-    if (!bar || !hintEl) return;
-    if (currentStage !== 'review') {
-        bar.style.display = 'none';
-        return;
-    }
-    const condition = experimentData.condition;
-    if (condition === 2 || condition === 4) {
-        bar.style.display = 'none';
-        return;
-    }
-    bar.style.display = 'flex';
-    hintEl.textContent = '';
-    hintEl.style.display = 'none';
+    syncReviewNextStepDockVisibility();
 }
 
 // 복습 단계 설정
@@ -1438,16 +1448,33 @@ function setupReviewStage() {
 
     updateReviewStageBar();
 
-    // 복습 상단 바 '다음 단계로': 조건 1·3만 1분 후 표시 (조건 2·4는 문제 7에서 '제출' 사용)
+    // 복습 우측 하단 '다음 단계': 조건 1·3만 1분 후 활성화 (조건 2·4는 '다음 문제' 아래 '다음 단계' 사용)
     const reviewToSurveyBtn = document.getElementById('review-to-survey-btn');
-    if (reviewToSurveyBtn) reviewToSurveyBtn.style.display = 'none';
+    if (reviewToSurveyBtn) reviewToSurveyBtn.hidden = true;
     setupReviewToSurveyDelay();
 
     setupQuestionTypeExclusiveCheckboxes();
 }
 
 // 질문생성: 기억(사실) / 응용(추론) 중 하나만 선택
+function syncQuestionTypeCheckboxLabels() {
+    const specs = [
+        ['question-type-fact', '기억(사실)'],
+        ['question-type-understand', '응용(추론)'],
+    ];
+    for (const [id, labelText] of specs) {
+        const input = document.getElementById(id);
+        const label = input?.closest('.question-type-label');
+        if (!input || !label) continue;
+        while (label.lastChild && label.lastChild !== input) {
+            label.removeChild(label.lastChild);
+        }
+        label.append(document.createTextNode(` ${labelText}`));
+    }
+}
+
 function setupQuestionTypeExclusiveCheckboxes() {
+    syncQuestionTypeCheckboxLabels();
     const factCb = document.getElementById('question-type-fact');
     const understandCb = document.getElementById('question-type-understand');
     if (!factCb || !understandCb || factCb.dataset.exclusiveBound === '1') return;
@@ -1491,11 +1518,11 @@ function showCurrentPair() {
         pairInfo.textContent = `문제 ${currentPairIndex + 1}`;
     }
     
-    // 조건 2·4: 상단 '다음 단계로' 대신 하단 '다음 문제' / '제출' 버튼 사용
+    // 조건 2·4: 우측 하단 독 대신 '다음 문제' 아래 '다음 단계' 버튼 사용
     const condition = experimentData.condition;
     const reviewToSurveyBtn = document.getElementById('review-to-survey-btn');
     if (reviewToSurveyBtn && (condition === 2 || condition === 4)) {
-        reviewToSurveyBtn.style.display = 'none';
+        reviewToSurveyBtn.hidden = true;
     }
 
     updateQuestionPairActionButton();
@@ -1542,6 +1569,7 @@ function updateQuestionPairActionButton() {
         const canSubmit = currentPairIndex >= 5;
         pairSubmitBtn.hidden = !canSubmit;
         pairSubmitBtn.style.display = canSubmit ? 'inline-block' : 'none';
+        pairSubmitBtn.textContent = '다음 단계';
     }
 }
 
@@ -2673,9 +2701,10 @@ function setReviewInstructionCondition3Page2() {
     const content = document.getElementById('review-instruction-content');
     if (!content) return;
     content.innerHTML = `
-        <p>시간 제한은 없으나, 1분이 지나고 '다음' 버튼이 활성화됩니다.</p>
-        <p>시험을 볼 준비가 되었다고 판단했을 때 '다음' 버튼을 눌러 다음 단계로 이동해주세요.</p>
-        <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러주세요.</strong></p>
+        <p>복습 화면에서 지문을 다시 학습합니다.</p>
+        <p>시간 제한은 없으나, 복습 화면에서 최소 1분 이상 학습한 뒤 '다음 단계' 버튼이 활성화됩니다.</p>
+        <p>시험을 볼 준비가 되었다고 판단했을 때 '다음 단계' 버튼을 눌러 다음 단계로 이동해주세요.</p>
+        <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 복습을 시작해 주세요.</strong></p>
     `;
 }
 
@@ -2684,7 +2713,7 @@ function startReviewStage() {
     if (experimentData.condition) {
         setupReviewInstruction();
         showStage('review-instruction');
-        setupReviewInstructionNextDelay();
+        resetReviewInstructionNextButton();
     } else {
         // 설계자 모드에서 조건이 없을 때는 바로 복습 화면으로
         showStage('review');
@@ -3543,9 +3572,9 @@ function setupReviewInstruction() {
         content.innerHTML = `
             <p>첫 번째 학습을 마쳤습니다.</p>
             <p>지금부터는 앞에서 공부했던 지문을 동일한 방식으로 다시 학습합니다.</p>
-            <p style="margin-top: 1em;">시간 제한은 없으나, 1분이 지나고 '다음' 버튼이 활성화됩니다.</p>
-            <p>시험을 볼 준비가 되었다고 판단했을 때 '다음' 버튼을 눌러 다음 단계로 이동해주세요.</p>
-            <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러주세요.</strong></p>
+            <p style="margin-top: 1em;">시간 제한은 없으나, 복습 화면에서 최소 1분 이상 학습한 뒤 '다음 단계' 버튼이 활성화됩니다.</p>
+            <p>시험을 볼 준비가 되었다고 판단했을 때 '다음 단계' 버튼을 눌러 다음 단계로 이동해주세요.</p>
+            <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 복습을 시작해 주세요.</strong></p>
         `;
     } else if (condition === 2) {
         // 조건 2: 지문+질문생성 (첫 페이지)
@@ -3721,10 +3750,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // 복습 안내 다음 버튼
     document.getElementById('review-instruction-next-btn').addEventListener('click', () => {
         const condition = experimentData.condition;
-        if (condition === 1 && isStageDelayActive('reviewInstructionNext')) {
-            alert(`다음 버튼은 ${getStageDelayRemainingSec('reviewInstructionNext')}초 후 활성화됩니다.`);
-            return;
-        }
         const reviewNextBtn = document.getElementById('review-instruction-next-btn');
         const content = document.getElementById('review-instruction-content');
         // 조건 2(지문+질문생성): 1페이지 → 2페이지(객관식 예시) → 3페이지(주관식 예시) → 4페이지 → 복습 화면
@@ -3753,7 +3778,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (condition === 3 && reviewInstructionStep === 1) {
             reviewInstructionStep = 2;
             setReviewInstructionCondition3Page2();
-            setupReviewInstructionNextDelay();
+            resetReviewInstructionNextButton();
             return;
         }
         if (condition === 3 && reviewInstructionStep === 2) {
@@ -4046,7 +4071,7 @@ document.addEventListener('DOMContentLoaded', () => {
         uploadBtn.addEventListener('click', uploadData);
     }
     
-    // 질문+답+해설 쌍 다음 / 제출 버튼
+    // 질문+답+해설 쌍 다음 / 다음 단계 버튼
     const pairNextBtn = document.getElementById('pair-next-btn');
     const pairSubmitBtn = document.getElementById('pair-submit-btn');
     if (pairNextBtn) {
