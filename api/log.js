@@ -1,23 +1,10 @@
 import {
-    getSupabaseConfig,
     insertExperimentEvents,
-    logSupabaseEnvDiagnostics,
     normalizeExperimentEventRows,
-    SUPABASE_ENV_SERVICE_ROLE_KEY,
-    SUPABASE_ENV_URL,
     upsertParticipantSummary,
 } from '../lib/supabase-experiment.js';
 
-/**
- * Vercel Serverless: handler에서 env를 읽어 lib로 전달 (번들/런타임 이슈 방지)
- */
-function readSupabaseEnvForHandler() {
-    const fromProcess = getSupabaseConfig();
-    return {
-        supabaseUrl: fromProcess.supabaseUrl,
-        serviceKey: fromProcess.serviceKey,
-    };
-}
+/** Node.js Serverless Function (Edge 아님). export const runtime = 'edge' 사용 금지. */
 
 function setCors(res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -26,10 +13,17 @@ function setCors(res) {
 }
 
 /**
+ * handler 호출 시점에만 env 읽기 (빌드 타임 인라인 방지: bracket notation)
+ */
+function readSupabaseEnvInHandler() {
+    const env = typeof process !== 'undefined' && process.env ? process.env : {};
+    const url = String(env['SUPABASE_URL'] || '').trim().replace(/\/$/, '');
+    const key = String(env['SUPABASE_SERVICE_ROLE_KEY'] || '').trim();
+    return { supabaseUrl: url, serviceKey: key };
+}
+
+/**
  * POST /api/log
- * - action=insert_events (기본): experiment_events insert
- * - action=upsert_summary: participant_summary upsert
- * - 하위 호환: event_rows 배열
  * @param {import('http').IncomingMessage} req
  * @param {import('http').ServerResponse} res
  */
@@ -45,30 +39,39 @@ export default async function handler(req, res) {
         return res.status(405).json({ ok: false, error: 'method_not_allowed' });
     }
 
-    const body = typeof req.body === 'object' && req.body !== null ? req.body : {};
-    const action = String(body.action || 'insert_events');
-    const supabaseConfig = readSupabaseEnvForHandler();
+    const SUPABASE_URL = typeof process !== 'undefined' && process.env ? process.env['SUPABASE_URL'] : undefined;
+    const SUPABASE_SERVICE_ROLE_KEY =
+        typeof process !== 'undefined' && process.env ? process.env['SUPABASE_SERVICE_ROLE_KEY'] : undefined;
 
     console.log('[api/log] env check', {
-        action,
-        expectedNames: [SUPABASE_ENV_URL, SUPABASE_ENV_SERVICE_ROLE_KEY],
-        hasUrl: !!supabaseConfig.supabaseUrl,
-        hasKey: !!supabaseConfig.serviceKey,
-        urlLength: supabaseConfig.supabaseUrl ? supabaseConfig.supabaseUrl.length : 0,
-        keyLength: supabaseConfig.serviceKey ? supabaseConfig.serviceKey.length : 0,
+        hasUrl: !!SUPABASE_URL,
+        hasKey: !!SUPABASE_SERVICE_ROLE_KEY,
+        urlLength: SUPABASE_URL ? String(SUPABASE_URL).length : 0,
+        keyLength: SUPABASE_SERVICE_ROLE_KEY ? String(SUPABASE_SERVICE_ROLE_KEY).length : 0,
+        hasProcess: typeof process !== 'undefined',
+        hasProcessEnv: typeof process !== 'undefined' && !!process.env,
+        vercelEnv: typeof process !== 'undefined' && process.env ? process.env['VERCEL_ENV'] || null : null,
     });
 
+    const supabaseConfig = readSupabaseEnvInHandler();
+
     if (!supabaseConfig.supabaseUrl || !supabaseConfig.serviceKey) {
-        const diag = logSupabaseEnvDiagnostics(`api/log:${action}`);
         return res.status(500).json({
             ok: false,
             error: 'missing_supabase_config',
             detail: {
-                message: 'Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel Environment Variables, then redeploy.',
-                diagnostics: diag.readNames,
+                message:
+                    'Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel Environment Variables, then redeploy.',
+                diagnostics: {
+                    SUPABASE_URL: !!SUPABASE_URL,
+                    SUPABASE_SERVICE_ROLE_KEY: !!SUPABASE_SERVICE_ROLE_KEY,
+                },
             },
         });
     }
+
+    const body = typeof req.body === 'object' && req.body !== null ? req.body : {};
+    const action = String(body.action || 'insert_events');
 
     try {
         if (action === 'upsert_summary') {
@@ -78,7 +81,11 @@ export default async function handler(req, res) {
             }
             const result = await upsertParticipantSummary(summary, supabaseConfig);
             if (!result.ok) {
-                return res.status(result.status || 502).json({ ok: false, error: 'supabase_upsert_failed', detail: result.error });
+                return res.status(result.status || 502).json({
+                    ok: false,
+                    error: 'supabase_upsert_failed',
+                    detail: result.error,
+                });
             }
             return res.status(200).json({ ok: true, upserted: 1 });
         }

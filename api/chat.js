@@ -7,6 +7,8 @@ import {
     sheetTimestampSeoul,
 } from '../lib/experiment-chat-core.js';
 
+/** Node.js Serverless Function (Edge 아님). export const runtime = 'edge' 사용 금지. */
+
 function setCors(res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
