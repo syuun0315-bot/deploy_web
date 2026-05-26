@@ -2,7 +2,7 @@ import {
     insertExperimentEvents,
     normalizeExperimentEventRows,
     upsertParticipantSummary,
-} from '../lib/supabase-experiment.js';
+} from './lib/supabase-experiment.js';
 
 /** Node.js Serverless Function (Edge 아님). export const runtime = 'edge' 사용 금지. */
 

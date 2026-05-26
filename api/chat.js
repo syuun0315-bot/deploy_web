@@ -5,7 +5,7 @@ import {
     OPENAI_TEMPERATURE,
     resolveOpenAiModel,
     sheetTimestampSeoul,
-} from '../lib/experiment-chat-core.js';
+} from './lib/experiment-chat-core.js';
 
 /** Node.js Serverless Function (Edge 아님). export const runtime = 'edge' 사용 금지. */
 
