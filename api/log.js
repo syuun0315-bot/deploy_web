@@ -1,6 +1,7 @@
 import {
     insertExperimentEvents,
     normalizeExperimentEventRows,
+    normalizeSupabaseProjectUrl,
     upsertParticipantSummary,
 } from './lib/supabase-experiment.js';
 
@@ -17,7 +18,7 @@ function setCors(res) {
  */
 function readSupabaseEnvInHandler() {
     const env = typeof process !== 'undefined' && process.env ? process.env : {};
-    const url = String(env['SUPABASE_URL'] || '').trim().replace(/\/$/, '');
+    const url = normalizeSupabaseProjectUrl(env['SUPABASE_URL'] || '');
     const key = String(env['SUPABASE_SERVICE_ROLE_KEY'] || '').trim();
     return { supabaseUrl: url, serviceKey: key };
 }
@@ -81,10 +82,11 @@ export default async function handler(req, res) {
             }
             const result = await upsertParticipantSummary(summary, supabaseConfig);
             if (!result.ok) {
+                console.error('[api/log] supabase upsert failed', result.detail || result.error);
                 return res.status(result.status || 502).json({
                     ok: false,
                     error: 'supabase_upsert_failed',
-                    detail: result.error,
+                    detail: result.detail || result.error,
                 });
             }
             return res.status(200).json({ ok: true, upserted: 1 });
@@ -98,10 +100,11 @@ export default async function handler(req, res) {
 
         const result = await insertExperimentEvents(rows, supabaseConfig);
         if (!result.ok) {
+            console.error('[api/log] supabase insert failed', result.detail || result.error);
             return res.status(result.status || 502).json({
                 ok: false,
                 error: 'supabase_insert_failed',
-                detail: result.error,
+                detail: result.detail || result.error,
             });
         }
 

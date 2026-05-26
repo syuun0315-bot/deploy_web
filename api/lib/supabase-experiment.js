@@ -1,7 +1,9 @@
 /**
- * Supabase REST helpers (Vercel api/log.js 전용)
- * 이 파일 내부에는 다른 local import 없음
+ * Supabase helpers (Vercel api/log.js)
+ * @supabase/supabase-js 사용 — /rest/v1 수동 fetch 조합 없음
  */
+
+import { createClient } from '@supabase/supabase-js';
 
 const CANONICAL_PAGE_NAMES = new Set([
     'welcome',
@@ -21,9 +23,22 @@ const CANONICAL_PAGE_NAMES = new Set([
 export const SUPABASE_ENV_URL = 'SUPABASE_URL';
 export const SUPABASE_ENV_SERVICE_ROLE_KEY = 'SUPABASE_SERVICE_ROLE_KEY';
 
+/**
+ * SUPABASE_URL은 https://xxxxx.supabase.co 만 허용.
+ * env에 /rest/v1 이 붙어 있으면 제거 (중복 방지).
+ * @param {string} raw
+ */
+export function normalizeSupabaseProjectUrl(raw) {
+    let url = String(raw || '').trim();
+    if (!url) return '';
+    url = url.replace(/\/+$/, '');
+    url = url.replace(/\/rest\/v1\/?$/i, '');
+    return url;
+}
+
 export function readSupabaseEnvFromProcess() {
     const env = typeof process !== 'undefined' && process.env ? process.env : {};
-    const supabaseUrl = String(env[SUPABASE_ENV_URL] || '').trim().replace(/\/$/, '');
+    const supabaseUrl = normalizeSupabaseProjectUrl(env[SUPABASE_ENV_URL] || '');
     const serviceKey = String(env[SUPABASE_ENV_SERVICE_ROLE_KEY] || '').trim();
     return { supabaseUrl, serviceKey };
 }
@@ -31,13 +46,29 @@ export function readSupabaseEnvFromProcess() {
 export function getSupabaseConfig(override) {
     if (override && (override.supabaseUrl || override.serviceKey)) {
         return {
-            supabaseUrl: String(override.supabaseUrl || '')
-                .trim()
-                .replace(/\/$/, ''),
+            supabaseUrl: normalizeSupabaseProjectUrl(override.supabaseUrl || ''),
             serviceKey: String(override.serviceKey || '').trim(),
         };
     }
     return readSupabaseEnvFromProcess();
+}
+
+export function buildSupabaseRestUrl(projectUrl, table) {
+    const base = normalizeSupabaseProjectUrl(projectUrl);
+    return `${base}/rest/v1/${table}`;
+}
+
+/**
+ * @param {{ supabaseUrl: string, serviceKey: string }} cfg
+ */
+function createSupabaseAdminClient(cfg) {
+    const projectUrl = normalizeSupabaseProjectUrl(cfg.supabaseUrl);
+    return createClient(projectUrl, cfg.serviceKey, {
+        auth: {
+            persistSession: false,
+            autoRefreshToken: false,
+        },
+    });
 }
 
 export function logSupabaseEnvDiagnostics(context = '') {
@@ -56,6 +87,7 @@ export function logSupabaseEnvDiagnostics(context = '') {
             [SUPABASE_ENV_SERVICE_ROLE_KEY]: !!env[SUPABASE_ENV_SERVICE_ROLE_KEY],
         },
         vercelEnv: env['VERCEL_ENV'] || null,
+        normalizedProjectUrl: cfg.supabaseUrl || null,
     };
     console.log('[supabase] env diagnostics', diag);
     return diag;
@@ -68,6 +100,56 @@ function resolveSupabaseConfig(configOverride, context) {
     }
     logSupabaseEnvDiagnostics(context);
     return null;
+}
+
+function toRawErrorObject(error) {
+    if (error == null) return null;
+    if (typeof error !== 'object') return { value: String(error) };
+
+    const raw = {};
+    const keys = new Set([...Object.keys(error), ...Object.getOwnPropertyNames(error)]);
+    for (const key of keys) {
+        raw[key] = error[key];
+    }
+    return raw;
+}
+
+/**
+ * Supabase insert/upsert 실패 시 Vercel Logs + API response 공통 포맷
+ * @param {string} table
+ * @param {{ supabaseUrl?: string }} cfg
+ * @param {string} requestUrl
+ * @param {unknown} error
+ */
+export function buildSupabaseFailureDetail(table, cfg, requestUrl, error) {
+    const err = error && typeof error === 'object' ? error : { message: String(error ?? 'unknown_error') };
+    const raw = toRawErrorObject(err);
+
+    return {
+        table,
+        normalizedSupabaseUrl: normalizeSupabaseProjectUrl(cfg?.supabaseUrl || ''),
+        requestUrl,
+        code: err.code ?? raw?.code ?? null,
+        message: err.message ?? raw?.message ?? null,
+        details: err.details ?? raw?.details ?? null,
+        hint: err.hint ?? raw?.hint ?? null,
+        status: err.status ?? raw?.status ?? null,
+        raw,
+    };
+}
+
+function logSupabaseClientError(table, cfg, requestUrl, payload, error) {
+    const detail = buildSupabaseFailureDetail(table, cfg, requestUrl, error);
+
+    console.error('[supabase] request failed', detail);
+    console.error('[supabase] raw error object', error);
+
+    if (payload !== undefined) {
+        const payloadPreview = Array.isArray(payload)
+            ? { count: payload.length, sample: payload[0] ?? null }
+            : payload;
+        console.error('[supabase] request payload', payloadPreview);
+    }
 }
 
 export function normalizeExperimentEventRow(row) {
@@ -139,108 +221,88 @@ export function normalizeExperimentEventRows(rows) {
     return rows.map((r) => normalizeExperimentEventRow(r && typeof r === 'object' ? r : {}));
 }
 
-function logSupabaseFailure(table, payload, resStatus, errText, parsed) {
-    console.error('[supabase] request failed', {
-        table,
-        payload,
-        status: resStatus,
-        message: parsed?.message || errText,
-        code: parsed?.code || null,
-        details: parsed?.details || null,
-        hint: parsed?.hint || null,
-        raw: errText?.slice?.(0, 2000) || errText,
-    });
-}
-
 export async function insertExperimentEvents(rows, configOverride) {
     const table = 'experiment_events';
     const cfg = resolveSupabaseConfig(configOverride, 'insertExperimentEvents');
     if (!cfg) {
-        console.error('[supabase] insert failed', {
+        const detail = {
             table,
-            payload: rows,
-            message: 'missing_supabase_config',
-        });
-        return { ok: false, error: 'missing_supabase_config' };
+            normalizedSupabaseUrl: null,
+            requestUrl: null,
+            code: 'missing_supabase_config',
+            message: 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing',
+            details: null,
+            hint: 'Set env vars in Vercel and redeploy',
+            raw: { code: 'missing_supabase_config' },
+        };
+        console.error('[supabase] insert failed', detail);
+        console.error('[supabase] raw error object', detail.raw);
+        return { ok: false, status: 500, error: 'missing_supabase_config', detail };
     }
-    const { supabaseUrl, serviceKey } = cfg;
     if (!rows.length) {
         return { ok: true, inserted: 0 };
     }
 
     const payload = rows;
-    console.log('[supabase] insert begin', { table, count: payload.length, sample: payload[0] });
-
-    const restUrl = `${supabaseUrl}/rest/v1/${table}`;
-    const res = await fetch(restUrl, {
-        method: 'POST',
-        headers: {
-            apikey: serviceKey,
-            Authorization: `Bearer ${serviceKey}`,
-            'Content-Type': 'application/json',
-            Prefer: 'return=minimal',
-        },
-        body: JSON.stringify(payload),
+    const requestUrl = buildSupabaseRestUrl(cfg.supabaseUrl, table);
+    console.log('[supabase] insert begin', {
+        table,
+        normalizedSupabaseUrl: cfg.supabaseUrl,
+        count: payload.length,
+        sample: payload[0],
     });
+    console.log('[supabase] request url', requestUrl);
 
-    const text = await res.text().catch(() => '');
-    let parsed = null;
-    try {
-        parsed = text ? JSON.parse(text) : null;
-    } catch {
-        parsed = { message: text };
+    const supabase = createSupabaseAdminClient(cfg);
+    const { error } = await supabase.from(table).insert(payload);
+
+    if (error) {
+        const detail = buildSupabaseFailureDetail(table, cfg, requestUrl, error);
+        logSupabaseClientError(table, cfg, requestUrl, payload, error);
+        return { ok: false, status: error.status || 502, error: detail.message || 'supabase_insert_failed', detail };
     }
 
-    if (!res.ok) {
-        logSupabaseFailure(table, payload, res.status, text, parsed);
-        return { ok: false, status: res.status, error: parsed };
-    }
-
-    console.log('[supabase] insert result', { table, status: res.status, inserted: payload.length });
-    return { ok: true, inserted: payload.length, status: res.status };
+    console.log('[supabase] insert result', { table, requestUrl, inserted: payload.length });
+    return { ok: true, inserted: payload.length };
 }
 
 export async function upsertParticipantSummary(summaryRow, configOverride) {
     const table = 'participant_summary';
     const cfg = resolveSupabaseConfig(configOverride, 'upsertParticipantSummary');
     if (!cfg) {
-        console.error('[supabase] upsert failed', {
+        const detail = {
             table,
-            payload: summaryRow,
-            message: 'missing_supabase_config',
-        });
-        return { ok: false, error: 'missing_supabase_config' };
+            normalizedSupabaseUrl: null,
+            requestUrl: null,
+            code: 'missing_supabase_config',
+            message: 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing',
+            details: null,
+            hint: 'Set env vars in Vercel and redeploy',
+            raw: { code: 'missing_supabase_config' },
+        };
+        console.error('[supabase] upsert failed', detail);
+        console.error('[supabase] raw error object', detail.raw);
+        return { ok: false, status: 500, error: 'missing_supabase_config', detail };
     }
-    const { supabaseUrl, serviceKey } = cfg;
 
     const payload = summaryRow;
-    console.log('[supabase] upsert begin', { table, participant_id: payload.participant_id });
-
-    const restUrl = `${supabaseUrl}/rest/v1/${table}?on_conflict=participant_id`;
-    const res = await fetch(restUrl, {
-        method: 'POST',
-        headers: {
-            apikey: serviceKey,
-            Authorization: `Bearer ${serviceKey}`,
-            'Content-Type': 'application/json',
-            Prefer: 'resolution=merge-duplicates,return=minimal',
-        },
-        body: JSON.stringify(payload),
+    const requestUrl = buildSupabaseRestUrl(cfg.supabaseUrl, table);
+    console.log('[supabase] upsert begin', {
+        table,
+        normalizedSupabaseUrl: cfg.supabaseUrl,
+        participant_id: payload.participant_id,
     });
+    console.log('[supabase] request url', requestUrl);
 
-    const text = await res.text().catch(() => '');
-    let parsed = null;
-    try {
-        parsed = text ? JSON.parse(text) : null;
-    } catch {
-        parsed = { message: text };
+    const supabase = createSupabaseAdminClient(cfg);
+    const { error } = await supabase.from(table).upsert(payload, { onConflict: 'participant_id' });
+
+    if (error) {
+        const detail = buildSupabaseFailureDetail(table, cfg, requestUrl, error);
+        logSupabaseClientError(table, cfg, requestUrl, payload, error);
+        return { ok: false, status: error.status || 502, error: detail.message || 'supabase_upsert_failed', detail };
     }
 
-    if (!res.ok) {
-        logSupabaseFailure(table, payload, res.status, text, parsed);
-        return { ok: false, status: res.status, error: parsed };
-    }
-
-    console.log('[supabase] upsert result', { table, status: res.status, participant_id: payload.participant_id });
-    return { ok: true, status: res.status };
+    console.log('[supabase] upsert result', { table, requestUrl, participant_id: payload.participant_id });
+    return { ok: true };
 }
