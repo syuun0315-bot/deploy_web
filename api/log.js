@@ -1,8 +1,23 @@
 import {
+    getSupabaseConfig,
     insertExperimentEvents,
+    logSupabaseEnvDiagnostics,
     normalizeExperimentEventRows,
+    SUPABASE_ENV_SERVICE_ROLE_KEY,
+    SUPABASE_ENV_URL,
     upsertParticipantSummary,
 } from '../lib/supabase-experiment.js';
+
+/**
+ * Vercel Serverless: handler에서 env를 읽어 lib로 전달 (번들/런타임 이슈 방지)
+ */
+function readSupabaseEnvForHandler() {
+    const fromProcess = getSupabaseConfig();
+    return {
+        supabaseUrl: fromProcess.supabaseUrl,
+        serviceKey: fromProcess.serviceKey,
+    };
+}
 
 function setCors(res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -32,6 +47,28 @@ export default async function handler(req, res) {
 
     const body = typeof req.body === 'object' && req.body !== null ? req.body : {};
     const action = String(body.action || 'insert_events');
+    const supabaseConfig = readSupabaseEnvForHandler();
+
+    console.log('[api/log] env check', {
+        action,
+        expectedNames: [SUPABASE_ENV_URL, SUPABASE_ENV_SERVICE_ROLE_KEY],
+        hasUrl: !!supabaseConfig.supabaseUrl,
+        hasKey: !!supabaseConfig.serviceKey,
+        urlLength: supabaseConfig.supabaseUrl ? supabaseConfig.supabaseUrl.length : 0,
+        keyLength: supabaseConfig.serviceKey ? supabaseConfig.serviceKey.length : 0,
+    });
+
+    if (!supabaseConfig.supabaseUrl || !supabaseConfig.serviceKey) {
+        const diag = logSupabaseEnvDiagnostics(`api/log:${action}`);
+        return res.status(500).json({
+            ok: false,
+            error: 'missing_supabase_config',
+            detail: {
+                message: 'Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel Environment Variables, then redeploy.',
+                diagnostics: diag.readNames,
+            },
+        });
+    }
 
     try {
         if (action === 'upsert_summary') {
@@ -39,7 +76,7 @@ export default async function handler(req, res) {
             if (!summary || typeof summary !== 'object') {
                 return res.status(400).json({ ok: false, error: 'participant_summary_required' });
             }
-            const result = await upsertParticipantSummary(summary);
+            const result = await upsertParticipantSummary(summary, supabaseConfig);
             if (!result.ok) {
                 return res.status(result.status || 502).json({ ok: false, error: 'supabase_upsert_failed', detail: result.error });
             }
@@ -52,7 +89,7 @@ export default async function handler(req, res) {
             return res.status(200).json({ ok: true, inserted: 0 });
         }
 
-        const result = await insertExperimentEvents(rows);
+        const result = await insertExperimentEvents(rows, supabaseConfig);
         if (!result.ok) {
             return res.status(result.status || 502).json({
                 ok: false,
