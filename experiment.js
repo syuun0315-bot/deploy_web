@@ -3148,10 +3148,10 @@ function syncDevPageSelect() {
 function updateDesignerInfo() {
     const currentCondition = designerCondition || experimentData.condition;
     const conditionNames = {
-        1: '조건 1: 지문으로 재학습',
-        2: '조건 2: 지문으로 질문생성',
-        3: '조건 3: 지문+AI로 재학습',
-        4: '조건 4: 지문+AI로 질문생성'
+        1: '조건1 - 재학습-self',
+        2: '조건2 - QG-self',
+        3: '조건3 - 재학습-AI',
+        4: '조건4 - QG-AI'
     };
     document.getElementById('current-condition').textContent = 
         currentCondition ? conditionNames[currentCondition] : '-';
