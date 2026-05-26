@@ -126,7 +126,7 @@ body {
     border-color: #216a94 !important;
 }
 
-/* 질문 생성: 문제 번호 + 사실/이해 체크 */
+/* 질문 생성: 문제 번호 + 기억(사실)/응용(추론) 체크 */
 .question-pair-toolbar {
     display: flex;
     flex-wrap: wrap;

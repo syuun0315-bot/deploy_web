@@ -96,7 +96,7 @@ let reviewInstructionStep = 0;
 // 데이터 수집: 챗봇 대화 로그 + 실험 이벤트(시트/백엔드용)
 // Google Sheets는 프론트가 아닌 서버(또는 Worker)에서만 접근. 프론트는 아래 URL로 JSON 전송.
 // ---------------------------------------------------------------------------
-/** 백엔드 저장 API (명시 없으면 CHAT_WORKER_URL 기반으로 /ingest 계산) */
+/** 백엔드 저장 API (실험 이벤트; 챗봇은 Vercel /api/chat) */
 const DATA_SINK_URL = '';
 
 const sessionState = {
@@ -118,6 +118,15 @@ const sessionState = {
     aiLiteracyQuestionStartedAt: null,
     /** Google Sheets에 이미 동기화된 chat 로그의 최대 message_order */
     lastSyncedChatLogOrder: 0,
+};
+
+/** 페이지별 체류·클릭 (participant_summary wide용) */
+const pageMetricsState = {
+    currentCanonicalPage: null,
+    enterAtMs: null,
+    clickBaseline: 0,
+    /** @type {Record<string, { enter_time?: string, leave_time?: string, dwell_time_ms?: number, click_count?: number, input_value?: string|null }>} */
+    byPage: {},
 };
 
 const collectedChatLogs = [];
@@ -177,26 +186,41 @@ function getOrCreateChatApiSessionId() {
     }
 }
 
-/** 배포된 Cloudflare Worker 루트 URL (POST 시 본문으로 채팅 전달, 응답은 { reply }) */
-const DEFAULT_EXPERIMENT_WORKER_URL = 'https://my-worker.syuun0315.workers.dev/api/chat';
+/** Vercel 채팅 API (OpenAI 호출은 서버리스에서만 수행) */
+const CHAT_API_PATH = '/api/chat';
 
-function getExperimentWorkerUrl() {
+/** 실험 이벤트·요약 저장 API (Vercel /api/log → Supabase) */
+const LOG_API_PATH = '/api/log';
+const DEFAULT_DATA_SINK_URL = LOG_API_PATH;
+
+function isLocalDevHost() {
+    if (typeof window === 'undefined' || !window.location) return false;
+    const host = window.location.hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0';
+}
+
+/**
+ * 챗봇 엔드포인트. 기본은 동일 origin의 /api/chat (Vercel 배포·vercel dev).
+ * 정적만 띄울 때는 experiment.html에서 window.CHAT_API_URL 로 배포 URL 지정 가능.
+ */
+function getChatApiUrl() {
     try {
-        if (typeof window !== 'undefined' && window.EXPERIMENT_WORKER_URL && String(window.EXPERIMENT_WORKER_URL).trim()) {
-            return String(window.EXPERIMENT_WORKER_URL).trim().replace(/\/$/, '');
-        }
-        if (typeof window !== 'undefined' && window.CHAT_WORKER_URL && String(window.CHAT_WORKER_URL).trim()) {
-            return String(window.CHAT_WORKER_URL).trim().replace(/\/$/, '');
+        if (typeof window !== 'undefined' && window.CHAT_API_URL && String(window.CHAT_API_URL).trim()) {
+            return String(window.CHAT_API_URL).trim().replace(/\/$/, '');
         }
     } catch {
         /* ignore */
     }
-    return DEFAULT_EXPERIMENT_WORKER_URL;
+    return CHAT_API_PATH;
 }
 
 function getDataSinkUrl(options) {
-    if (options && options.url && String(options.url).trim()) return String(options.url).trim();
-    if (DATA_SINK_URL && String(DATA_SINK_URL).trim()) return String(DATA_SINK_URL).trim();
+    if (options && options.url && String(options.url).trim()) {
+        return String(options.url).trim();
+    }
+    if (DATA_SINK_URL && String(DATA_SINK_URL).trim()) {
+        return String(DATA_SINK_URL).trim();
+    }
     try {
         if (typeof window !== 'undefined' && typeof window.DATA_SINK_URL === 'string' && window.DATA_SINK_URL.trim()) {
             return window.DATA_SINK_URL.trim();
@@ -204,25 +228,27 @@ function getDataSinkUrl(options) {
     } catch {
         /* ignore */
     }
-    return '';
+    return getLogApiUrl();
 }
 
 function getChatEndpointLabel() {
-    return getExperimentWorkerUrl();
+    return getChatApiUrl();
 }
 
-/** OpenAI용: 최근 user/assistant 5개 메시지만 (collectedChatLogs 기준) */
+/** OpenAI용: 최근 user/assistant 30개 메시지 (collectedChatLogs 기준, API와 동일 한도) */
+const CHAT_HISTORY_LIMIT = 30;
+
 function buildWorkerOpenAiMessagesLast30() {
     const lines = collectedChatLogs.filter((l) => l.role === 'user' || l.role === 'assistant');
-    const last = lines.slice(-5);
+    const last = lines.slice(-CHAT_HISTORY_LIMIT);
     return last.map((l) => ({
         role: l.role === 'assistant' ? 'assistant' : 'user',
         content: String(l.message_text || ''),
     }));
 }
 
-/** 시트용: 아직 Worker로 보내지 않은 발화만 (전체 로그는 collectedChatLogs에 누적 유지) */
-function buildUnsyncedSheetRowsForWorker() {
+/** 시트용: 아직 API로 보내지 않은 발화만 (전체 로그는 collectedChatLogs에 누적 유지) */
+function buildUnsyncedSheetRowsForChatApi() {
     const synced = sessionState.lastSyncedChatLogOrder || 0;
     return collectedChatLogs
         .filter((l) => (l.role === 'user' || l.role === 'assistant') && l.message_order > synced)
@@ -247,38 +273,91 @@ function buildUnsyncedSheetRowsForWorker() {
 }
 
 /**
- * Worker만 호출 (OpenAI는 Worker 내부에서만 호출)
+ * Vercel /api/chat 호출 (OpenAI는 서버리스 내부에서만 호출)
  * @param {string} message
  * @param {number} dwellTimeMs
  * @param {Array<{role:string,content:string}>} openAiMessages
  * @param {unknown[]} sheetRows
  */
-async function requestChatToWorker(message, dwellTimeMs, openAiMessages, sheetRows) {
-    const url = getExperimentWorkerUrl();
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            message: message,
-            session_id: sessionState.sessionId,
-            participant_id: getParticipantIdSafe(),
-            page_name: currentStage,
-            dwell_time_ms: dwellTimeMs,
-            messages: openAiMessages,
-            sheet_rows: sheetRows,
-        })
-    });
-    const data = await response.json().catch(() => ({}));
+async function requestChatApi(message, dwellTimeMs, openAiMessages, sheetRows) {
+    const url = getChatApiUrl();
+    const payload = {
+        message: message,
+        session_id: sessionState.sessionId,
+        participant_id: getParticipantIdSafe(),
+        page_name: currentStage,
+        dwell_time_ms: dwellTimeMs,
+        messages: openAiMessages,
+        sheet_rows: sheetRows,
+    };
+
+    console.log('[chat] POST begin', { url, origin: typeof window !== 'undefined' ? window.location.origin : '' });
+
+    let response;
+    let responseText = '';
+    try {
+        response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+        responseText = await response.text();
+    } catch (networkErr) {
+        console.error('[chat] fetch failed', {
+            url,
+            message: networkErr && networkErr.message ? networkErr.message : String(networkErr),
+            error: networkErr
+        });
+        throw networkErr;
+    }
+
+    let data = {};
+    try {
+        data = responseText ? JSON.parse(responseText) : {};
+    } catch (parseErr) {
+        console.error('[chat] response is not JSON', {
+            url,
+            status: response.status,
+            statusText: response.statusText,
+            bodyPreview: responseText.slice(0, 500),
+            parseError: parseErr && parseErr.message ? parseErr.message : String(parseErr)
+        });
+        throw new Error(`chat_invalid_json:${response.status}`);
+    }
+
     if (!response.ok) {
+        console.error('[chat] HTTP error', {
+            url,
+            status: response.status,
+            statusText: response.statusText,
+            data,
+            bodyPreview: responseText.slice(0, 500)
+        });
         const detail = data && (data.detail || data.error) ? String(data.detail || data.error) : '';
         throw new Error(`chat_api_error:${response.status}${detail ? ':' + detail.slice(0, 200) : ''}`);
     }
-    const aiResponse = extractWorkerChatReply(data);
+
+    const aiResponse = extractChatApiReply(data);
     if (!aiResponse) {
-        throw new Error('chat_no_reply');
+        console.error('[chat] empty reply', {
+            url,
+            status: response.status,
+            statusText: response.statusText,
+            data,
+            openaiStatus: data && data.status != null ? data.status : undefined,
+            openaiDetail: data && data.detail ? data.detail : undefined,
+            bodyPreview: responseText.slice(0, 500)
+        });
+        throw new Error(
+            data && data.error
+                ? `chat_no_reply:${String(data.error)}${data.detail ? ':' + String(data.detail).slice(0, 120) : ''}`
+                : 'chat_no_reply:empty'
+        );
     }
+
+    console.log('[chat] OK', { url, status: response.status, replyChars: aiResponse.length });
     return { data, aiResponse, endpoint: url };
 }
 
@@ -289,6 +368,173 @@ function getConditionLabel() {
     if (c === 3) return 'AI_reread';
     if (c === 4) return 'AI_question_generation';
     return c != null ? String(c) : 'unknown';
+}
+
+/** Supabase condition 컬럼 값 */
+function mapConditionToCode() {
+    const c = experimentData.condition;
+    if (c === 1) return 'restudy_text';
+    if (c === 2) return 'qg_text';
+    if (c === 3) return 'restudy_ai';
+    if (c === 4) return 'qg_ai';
+    return null;
+}
+
+const STAGE_TO_CANONICAL_PAGE = {
+    'experiment-start': 'welcome',
+    introduction: 'instruction',
+    'review-instruction': 'instruction',
+    learning: 'study_page_1',
+    jol1: 'study_page_2',
+    review: 'review_page',
+    survey: 'survey_mental_effort',
+    'survey-instruction': 'survey_mental_effort',
+    'math-preintro': 'distractor_page',
+    'distractor-instruction': 'distractor_page',
+    distractor: 'distractor_page',
+    'ai-literacy-survey': 'survey_mental_effort',
+    'final-test-instruction': 'instruction',
+    'final-test': 'final_test_fact',
+    'post-survey-intro': 'survey_mental_effort',
+    'post-survey': 'survey_mental_effort',
+    demographics: 'submit',
+    gifticon: 'submit',
+    completion: 'submit',
+    termination: 'submit',
+};
+
+function resolveCanonicalPageName(stageKey, partialPageName) {
+    if (partialPageName && STAGE_TO_CANONICAL_PAGE[partialPageName] === undefined) {
+        const p = String(partialPageName);
+        if (p.startsWith('final_test_q')) {
+            const n = parseInt(p.replace('final_test_q', ''), 10);
+            if (n >= 7) return 'final_test_transfer';
+            return 'final_test_fact';
+        }
+        if (p.startsWith('distractor')) return 'distractor_page';
+        if (p.startsWith('survey') || p.startsWith('post_survey') || p.startsWith('ai_literacy')) {
+            return 'survey_mental_effort';
+        }
+    }
+    const stage = stageKey || currentStage;
+    if (stage === 'review') {
+        const c = experimentData.condition;
+        if (c === 2) return 'review_qg_text';
+        if (c === 3 || c === 4) return 'review_qg_ai';
+        return 'review_page';
+    }
+    return STAGE_TO_CANONICAL_PAGE[stage] || 'instruction';
+}
+
+function getLogApiUrl() {
+    try {
+        if (typeof window !== 'undefined' && window.DATA_SINK_URL && String(window.DATA_SINK_URL).trim()) {
+            const u = String(window.DATA_SINK_URL).trim();
+            if (u.startsWith('http')) return u.replace(/\/$/, '');
+            return u;
+        }
+    } catch {
+        /* ignore */
+    }
+    return LOG_API_PATH;
+}
+
+function rememberPageMetrics(canonicalPage, enterIso, leaveIso, dwellMs, clickCount, inputValue) {
+    if (!canonicalPage) return;
+    const prev = pageMetricsState.byPage[canonicalPage] || {};
+    pageMetricsState.byPage[canonicalPage] = {
+        enter_time: prev.enter_time || enterIso || null,
+        leave_time: leaveIso || prev.leave_time || null,
+        dwell_time_ms:
+            dwellMs != null
+                ? (prev.dwell_time_ms || 0) + dwellMs
+                : prev.dwell_time_ms != null
+                  ? prev.dwell_time_ms
+                  : null,
+        click_count: clickCount != null ? clickCount : prev.click_count != null ? prev.click_count : null,
+        input_value: inputValue != null ? inputValue : prev.input_value != null ? prev.input_value : null,
+    };
+}
+
+/**
+ * @param {Record<string, unknown>} partial
+ */
+function buildSupabaseEventRow(partial) {
+    const pageName = resolveCanonicalPageName(partial.stage_key, partial.page_name);
+    const row = {
+        participant_id: getParticipantIdSafe(),
+        session_id: sessionState.sessionId,
+        condition: mapConditionToCode(),
+        event_type: partial.event_type || partial.block_name || 'experiment_event',
+        page_name: pageName,
+        event_timestamp: partial.event_timestamp || partial.timestamp || experimentSheetTimestamp(),
+        page_enter_time: partial.page_enter_time ?? null,
+        page_leave_time: partial.page_leave_time ?? null,
+        page_dwell_time_ms: partial.page_dwell_time_ms ?? partial.time_spent ?? partial.dwell_time_ms ?? null,
+        click_count: partial.click_count != null ? partial.click_count : null,
+        input_value: partial.input_value != null ? String(partial.input_value) : partial.response_value != null ? String(partial.response_value) : null,
+        item_id: partial.item_id ?? null,
+        participant_answer: partial.participant_answer ?? null,
+        correct_answer: partial.correct_answer ?? null,
+        correctness: partial.correctness != null ? partial.correctness : partial.is_correct,
+        distractor_total_attempted_count: partial.distractor_total_attempted_count ?? null,
+        distractor_correct_count: partial.distractor_correct_count ?? null,
+        distractor_incorrect_count: partial.distractor_incorrect_count ?? null,
+        distractor_accuracy: partial.distractor_accuracy ?? null,
+        chatbot_user_message: partial.chatbot_user_message ?? null,
+        chatbot_ai_reply: partial.chatbot_ai_reply ?? null,
+        generated_question_text: partial.generated_question_text ?? null,
+        generated_answer_text: partial.generated_answer_text ?? null,
+        generated_explanation_text: partial.generated_explanation_text ?? null,
+        question_type_check_memory_fact: partial.question_type_check_memory_fact ?? null,
+        question_type_check_understanding_application: partial.question_type_check_understanding_application ?? null,
+        metadata: partial.metadata != null ? partial.metadata : partial.extra != null ? { extra: partial.extra } : {},
+    };
+    return row;
+}
+
+/**
+ * experiment_events 실시간 insert (실패해도 실험 UI는 계속)
+ * @param {Record<string, unknown>} partial
+ */
+async function postSupabaseEvent(partial) {
+    const url = getLogApiUrl();
+    const event = buildSupabaseEventRow(partial);
+    try {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            keepalive: true,
+            body: JSON.stringify({ action: 'insert_events', events: [event] }),
+        });
+        const text = await res.text();
+        let data = {};
+        try {
+            data = text ? JSON.parse(text) : {};
+        } catch {
+            data = { raw: text };
+        }
+        if (!res.ok) {
+            console.error('[supabase] insert failed (client)', {
+                table: 'experiment_events',
+                payload: event,
+                status: res.status,
+                message: data.message || data.error || text,
+                code: data.code,
+                details: data.details || data.detail,
+            });
+            return { ok: false };
+        }
+        return { ok: true };
+    } catch (err) {
+        console.error('[supabase] insert failed (client fetch)', {
+            table: 'experiment_events',
+            payload: event,
+            message: err && err.message ? err.message : String(err),
+            error: err,
+        });
+        return { ok: false };
+    }
 }
 
 function getParticipantIdSafe() {
@@ -350,6 +596,26 @@ function saveChatLog(role, messageText, taskStage, meta) {
         additional_metadata: resolvedMeta.additional_metadata != null ? resolvedMeta.additional_metadata : null,
     };
     collectedChatLogs.push(entry);
+
+    const canonicalPage = resolveCanonicalPageName(taskStage || currentStage);
+    if (role === 'user') {
+        postSupabaseEvent({
+            event_type: 'chat_user',
+            page_name: canonicalPage,
+            chatbot_user_message: entry.message_text,
+            dwell_time_ms: entry.dwell_time_ms,
+            metadata: { message_order: entry.message_order, task_stage: entry.task_stage },
+        });
+    } else {
+        postSupabaseEvent({
+            event_type: 'chat_ai',
+            page_name: canonicalPage,
+            chatbot_ai_reply: entry.message_text,
+            dwell_time_ms: entry.dwell_time_ms,
+            metadata: { message_order: entry.message_order, task_stage: entry.task_stage },
+        });
+    }
+
     return entry;
 }
 
@@ -385,6 +651,19 @@ function saveExperimentEvent(partial) {
         extra: partial.extra != null ? partial.extra : null,
     };
     collectedExperimentRows.push(row);
+
+    const canonicalPage = resolveCanonicalPageName(currentStage, partial.page_name);
+    const eventType = partial.event_type || partial.block_name || 'experiment_event';
+    postSupabaseEvent({
+        ...partial,
+        event_type: eventType,
+        page_name: canonicalPage,
+        click_count:
+            partial.click_count != null
+                ? partial.click_count
+                : Math.max(0, (experimentData.clickCount || 0) - (pageMetricsState.clickBaseline || 0)),
+    });
+
     return row;
 }
 
@@ -394,15 +673,44 @@ function recordStageDwellAndEnter(newStageKey) {
     const prevAt = sessionState.lastStageEnterAt;
     const now = Date.now();
     if (prevAt != null && prevStage !== newStageKey) {
+        const prevCanonical = resolveCanonicalPageName(prevStage);
+        const dwellMs = Math.round(now - prevAt);
+        const clickOnPage = Math.max(0, (experimentData.clickCount || 0) - (pageMetricsState.clickBaseline || 0));
+        const leaveIso = experimentSheetTimestamp(now);
+        const enterIso = experimentSheetTimestamp(prevAt);
+
         saveExperimentEvent({
-            page_name: `stage_${prevStage}`,
-            block_name: 'stage_dwell',
-            time_spent: Math.round(now - prevAt),
-            start_time: experimentSheetTimestamp(prevAt),
-            end_time: experimentSheetTimestamp(now),
+            page_name: prevCanonical,
+            block_name: 'page_exit',
+            event_type: 'page_exit',
+            time_spent: dwellMs,
+            start_time: enterIso,
+            end_time: leaveIso,
+            page_enter_time: enterIso,
+            page_leave_time: leaveIso,
+            page_dwell_time_ms: dwellMs,
+            click_count: clickOnPage,
         });
+
+        rememberPageMetrics(prevCanonical, enterIso, leaveIso, dwellMs, clickOnPage, null);
+        pageMetricsState.currentCanonicalPage = null;
     }
-    sessionState.lastStageEnterAt = now;
+
+    const newCanonical = resolveCanonicalPageName(newStageKey);
+    const enterMs = Date.now();
+    sessionState.lastStageEnterAt = enterMs;
+    pageMetricsState.currentCanonicalPage = newCanonical;
+    pageMetricsState.enterAtMs = enterMs;
+    pageMetricsState.clickBaseline = experimentData.clickCount || 0;
+
+    const enterIso = experimentSheetTimestamp(enterMs);
+    postSupabaseEvent({
+        event_type: 'page_enter',
+        page_name: newCanonical,
+        page_enter_time: enterIso,
+        click_count: 0,
+    });
+    rememberPageMetrics(newCanonical, enterIso, null, null, 0, null);
 }
 
 function getSurveyAnswerValue(qNum) {
@@ -473,9 +781,13 @@ function logFinalTestQuestionResponse(qNum) {
     const end = Date.now();
     const inp = document.getElementById(`test-q${qNum}`);
     const text = inp ? String(inp.value || '') : '';
+    const canonicalPage = qNum >= 7 ? 'final_test_transfer' : 'final_test_fact';
     saveExperimentEvent({
-        page_name: `final_test_q${qNum}`,
-        block_name: 'final_test',
+        page_name: canonicalPage,
+        block_name: 'answer_submit',
+        event_type: 'answer_submit',
+        item_id: `final_test_q${qNum}`,
+        input_value: text,
         response_value: text,
         time_spent: start != null ? Math.round(end - start) : null,
         start_time: start != null ? experimentSheetTimestamp(start) : null,
@@ -485,97 +797,124 @@ function logFinalTestQuestionResponse(qNum) {
     });
 }
 
+const SUMMARY_PAGE_KEYS = [
+    'welcome',
+    'instruction',
+    'study_page_1',
+    'study_page_2',
+    'review_page',
+    'review_qg_ai',
+    'review_qg_text',
+    'distractor_page',
+    'final_test_fact',
+    'final_test_transfer',
+    'survey_mental_effort',
+    'submit',
+];
+
+function buildParticipantSummaryRow() {
+    const startMs = experimentData.startTime ? new Date(experimentData.startTime).getTime() : null;
+    const endMs = Date.now();
+    const summary = {
+        participant_id: getParticipantIdSafe(),
+        session_id: sessionState.sessionId,
+        condition: mapConditionToCode(),
+        experiment_start_time: experimentData.startTime || null,
+        experiment_end_time: experimentSheetTimestamp(endMs),
+        total_duration_ms: startMs != null ? Math.max(0, endMs - startMs) : null,
+    };
+
+    for (const pageKey of SUMMARY_PAGE_KEYS) {
+        const m = pageMetricsState.byPage[pageKey] || {};
+        summary[`${pageKey}_enter_time`] = m.enter_time || null;
+        summary[`${pageKey}_leave_time`] = m.leave_time || null;
+        summary[`${pageKey}_dwell_time_ms`] = m.dwell_time_ms != null ? m.dwell_time_ms : null;
+        summary[`${pageKey}_click_count`] = m.click_count != null ? m.click_count : null;
+        summary[`${pageKey}_input_value`] = m.input_value != null ? m.input_value : null;
+    }
+
+    const d = experimentData.distractor;
+    const attempted = d?.totalCount ?? 0;
+    const correct = d?.correctCount ?? 0;
+    const incorrect =
+        d && Number.isFinite(d.wrongCount) ? d.wrongCount : Math.max(0, attempted - correct);
+    summary.distractor_total_attempted_count = attempted;
+    summary.distractor_correct_count = correct;
+    summary.distractor_incorrect_count = incorrect;
+    summary.distractor_accuracy = attempted > 0 ? correct / attempted : null;
+
+    summary.question_generation_count = Array.isArray(experimentData.review?.pairs)
+        ? experimentData.review.pairs.length
+        : 0;
+    summary.chat_user_message_count = collectedChatLogs.filter((l) => l.role === 'user').length;
+    summary.chat_ai_message_count = collectedChatLogs.filter((l) => l.role === 'assistant').length;
+    summary.experiment_snapshot = experimentData;
+    return summary;
+}
+
+async function upsertParticipantSummaryToBackend(options) {
+    const url = getDataSinkUrl(options);
+    const silent = options && options.silent;
+    const summary = buildParticipantSummaryRow();
+    try {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            keepalive: true,
+            body: JSON.stringify({ action: 'upsert_summary', participant_summary: summary }),
+        });
+        const text = await res.text();
+        let data = {};
+        try {
+            data = text ? JSON.parse(text) : {};
+        } catch {
+            data = { raw: text };
+        }
+        if (!res.ok) {
+            console.error('[supabase] upsert failed (client)', {
+                table: 'participant_summary',
+                payload: summary,
+                status: res.status,
+                message: data.message || data.error || text,
+                code: data.code,
+                details: data.details || data.detail,
+            });
+            return { ok: false };
+        }
+        if (!silent) console.log('[submitAllDataToBackend] participant_summary upsert 완료');
+        return { ok: true };
+    } catch (err) {
+        console.error('[supabase] upsert failed (client fetch)', {
+            table: 'participant_summary',
+            payload: summary,
+            message: err && err.message ? err.message : String(err),
+            error: err,
+        });
+        return { ok: false };
+    }
+}
+
 /**
- * 수집분을 백엔드로 전송 → 서버에서 Google Sheets 등에 기록
+ * 최종 제출: participant_summary upsert (+ 하위 호환 배치 event_rows)
  * @param {{ url?: string, silent?: boolean }} [options]
  */
 async function submitAllDataToBackend(options) {
     const url = getDataSinkUrl(options);
     const silent = options && options.silent;
     if (!url || !String(url).trim()) {
-        if (!silent) console.warn('[submitAllDataToBackend] DATA_SINK_URL/CHAT_WORKER_URL 이 비어 있어 전송하지 않습니다.');
+        if (!silent) console.warn('[submitAllDataToBackend] DATA_SINK_URL 이 비어 있어 전송하지 않습니다.');
         return { ok: false, skipped: true, reason: 'no_url' };
     }
-    const chatRows = collectedChatLogs.map((l) => ({
-        session_id: l.session_id,
-        participant_id: l.participant_id,
-        timestamp: l.timestamp,
-        page_name: l.task_stage || currentStage || 'unknown',
-        event_type: l.role === 'assistant' ? 'chat_assistant' : 'chat_user',
-        user_input: l.role === 'user' ? l.message_text : null,
-        bot_response: l.role === 'assistant' ? l.message_text : null,
-        correctness: null,
-        dwell_time_ms: l.dwell_time_ms != null ? l.dwell_time_ms : null,
-        additional_metadata: {
-            condition: l.condition,
-            condition_number: experimentData.condition,
-            interaction_click_count: experimentData.clickCount ?? 0,
-            dwell_time_seconds:
-                l.dwell_time_ms != null && Number.isFinite(l.dwell_time_ms)
-                    ? Math.max(0, Math.round(l.dwell_time_ms / 1000))
-                    : null,
-            message_order: l.message_order,
-            extra: l.additional_metadata != null ? l.additional_metadata : null,
-        },
-    }));
-    const eventRows = collectedExperimentRows.map((r) => ({
-        session_id: r.session_id,
-        participant_id: r.participant_id,
-        timestamp: r.timestamp,
-        page_name: r.page_name || null,
-        event_type: r.block_name || 'experiment_event',
-        user_input: r.response_value,
-        bot_response: null,
-        correctness: r.is_correct,
-        dwell_time_ms: r.time_spent,
-        additional_metadata: {
-            trial_number: r.trial_number,
-            condition: r.condition,
-            condition_number: r.condition_number,
-            interaction_click_count: r.interaction_click_count,
-            dwell_time_seconds: r.dwell_time_seconds,
-            response_time: r.response_time,
-            start_time: r.start_time,
-            end_time: r.end_time,
-            correct_answer: r.correct_answer,
-            score: r.score,
-            extra: r.extra,
-        },
-    }));
-    const d = experimentData.distractor;
-    const distractorWrong =
-        d && Number.isFinite(d.wrongCount) ? d.wrongCount : Math.max(0, (d?.totalCount || 0) - (d?.correctCount || 0));
-    const payload = {
-        participant_id: getParticipantIdSafe(),
-        session_id: sessionState.sessionId,
-        condition: getConditionLabel(),
-        condition_number: experimentData.condition,
-        interaction_click_count: experimentData.clickCount ?? 0,
-        distractor_math_summary: {
-            correct_total: d?.correctCount ?? 0,
-            wrong_total: distractorWrong,
-            trials_total: d?.totalCount ?? 0,
-        },
-        event_rows: chatRows.concat(eventRows),
-        chat_logs: collectedChatLogs.slice(),
-        experiment_data: collectedExperimentRows.slice(),
-        experiment_snapshot: experimentData,
-    };
+
     try {
-        const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            keepalive: true,
-            body: JSON.stringify(payload),
-        });
-        if (!res.ok) {
-            const t = await res.text();
-            throw new Error(`HTTP ${res.status}: ${t}`);
-        }
-        if (!silent) console.log('[submitAllDataToBackend] 전송 완료');
-        return { ok: true };
+        const summaryResult = await upsertParticipantSummaryToBackend(options);
+        if (!silent) console.log('[submitAllDataToBackend] participant_summary upsert', { ok: summaryResult.ok });
+        return summaryResult;
     } catch (e) {
-        console.error('[submitAllDataToBackend] 실패:', e);
+        console.error('[submitAllDataToBackend] 실패:', {
+            message: e && e.message ? e.message : String(e),
+            error: e,
+        });
         return { ok: false, error: String(e.message || e) };
     }
 }
@@ -821,7 +1160,7 @@ function setupReviewStage() {
                 welcomeMsg.className = 'chat-message ai';
                 setAssistantMessageBody(
                     welcomeMsg,
-                    '안녕하세요! 박쥐에 관한 학습 지문에 대해 질문해주세요. 도움을 드리겠습니다.',
+                    '안녕하세요! 박쥐 학습 자료를 바탕으로 궁금한 점을 자유롭게 질문해 주세요. 개념 설명, 예시, 비교, 배경지식 등 무엇이든 도와드리겠습니다.',
                     { markdown: false }
                 );
                 chatMessages.appendChild(welcomeMsg);
@@ -852,7 +1191,7 @@ function setupReviewStage() {
                 welcomeMsg.className = 'chat-message ai';
                 setAssistantMessageBody(
                     welcomeMsg,
-                    '안녕하세요! 박쥐에 관한 학습 지문에 대해 질문해주세요. 도움을 드리겠습니다.',
+                    '안녕하세요! 박쥐 학습 자료를 바탕으로 궁금한 점을 자유롭게 질문해 주세요. 개념 설명, 예시, 비교, 배경지식 등 무엇이든 도와드리겠습니다.',
                     { markdown: false }
                 );
                 chatMessages.appendChild(welcomeMsg);
@@ -883,7 +1222,7 @@ function setupReviewStage() {
     
     experimentData.review.startTime = experimentSheetTimestamp();
 
-    // 질문생성 조건(2, 4)에서만 사실/이해 유형 선택 표시 (1·3·개발자 미지정은 숨김)
+    // 질문생성 조건(2, 4)에서만 기억(사실)/응용(추론) 유형 선택 표시 (1·3·개발자 미지정은 숨김)
     const questionTypeChoices = document.querySelector('.question-type-choices');
     if (questionTypeChoices) {
         if (condition === 1 || condition === 3) {
@@ -984,7 +1323,7 @@ function moveToNextPair() {
     const typeFact = !!(factCb && factCb.checked);
     const typeUnderstand = !!(understandCb && understandCb.checked);
     if (!typeFact && !typeUnderstand) {
-        alert("이 문제가 '사실'인지 '이해'인지 체크해 주세요. (둘 다 해당되면 두 칸 모두 선택할 수 있습니다.)");
+        alert("이 문제가 '기억(사실)'인지 '응용(추론)'인지 체크해 주세요. (둘 다 해당되면 두 칸 모두 선택할 수 있습니다.)");
         return;
     }
     
@@ -1014,9 +1353,16 @@ function moveToNextPair() {
     
     const pairStart = sessionState.reviewPairStartedAt;
     const nowMs = Date.now();
+    const canonicalQgPage = resolveCanonicalPageName('review');
     saveExperimentEvent({
-        page_name: `review_generated_problem_${currentPairIndex + 1}`,
-        block_name: 'question_generation',
+        page_name: canonicalQgPage,
+        block_name: 'question_generation_submit',
+        event_type: 'question_generation_submit',
+        generated_question_text: question,
+        generated_answer_text: answer,
+        generated_explanation_text: explanation,
+        question_type_check_memory_fact: typeFact,
+        question_type_check_understanding_application: typeUnderstand,
         response_value: JSON.stringify({
             question,
             answer,
@@ -2031,14 +2377,14 @@ function startLearningStage() {
     });
 }
 
-// 조건 2 복습 안내 두 번째 페이지 내용 (사실 문제 예시)
+// 조건 2 복습 안내 두 번째 페이지 내용 (기억(사실) 문제 예시)
 function setReviewInstructionCondition2Page2() {
     const content = document.getElementById('review-instruction-content');
     if (!content) return;
     content.innerHTML = `
         <p>다음은 문제의 예시입니다.</p>
         <div style="margin-top: 1.5em; padding: 1em; background: #f9f9f9; border-radius: 6px; border-left: 4px solid #3498db;">
-            <p style="font-weight: bold; margin-bottom: 0.75em;">[예시 1 - 사실(개념) 문제]</p>
+            <p style="font-weight: bold; margin-bottom: 0.75em;">[예시 1 - 기억(사실) 문제]</p>
             <p style="font-weight: bold; margin-bottom: 0.5em;">Q. 큰 박쥐류와 작은 박쥐류는 서로 다른 방식으로 먹이의 위치를 특정합니다. 두 박쥐류는 각각 어떻게 먹이의 위치를 파악하나요?</p>
             <p style="margin-top: 1em;"><strong>답:</strong> 큰 박쥐류는 주로 시각에 의존하고, 작은 박쥐류는 반향정위를 이용한다.</p>
             <p style="margin-top: 0.75em;"><strong>해설:</strong> 지문에 따르면 큰 박쥐류는 시각을 통해 주변 환경을 파악하는 반면, 작은 박쥐류는 시각이 크게 발달하지 않았기 때문에 반향정위(echolocation)를 사용하여 먹이의 위치를 탐색한다. 반향정위는 초음파를 발사한 후 되돌아오는 메아리를 통해 물체의 위치를 파악하는 방식으로, 어두운 환경에서도 효과적으로 먹이를 찾을 수 있게 한다.</p>
@@ -2046,13 +2392,13 @@ function setReviewInstructionCondition2Page2() {
     `;
 }
 
-// 조건 2 복습 안내 세 번째 페이지 내용 (이해·추론 문제 예시)
+// 조건 2 복습 안내 세 번째 페이지 내용 (응용(추론) 문제 예시)
 function setReviewInstructionCondition2Page3() {
     const content = document.getElementById('review-instruction-content');
     if (!content) return;
     content.innerHTML = `
         <div style="margin-top: 0.5em; padding: 1em; background: #f9f9f9; border-radius: 6px; border-left: 4px solid #3498db;">
-            <p style="font-weight: bold; margin-bottom: 0.75em;">[예시 2 - 이해(추론) 문제]</p>
+            <p style="font-weight: bold; margin-bottom: 0.75em;">[예시 2 - 응용(추론) 문제]</p>
             <p style="font-weight: bold; margin-bottom: 0.5em;">Q. 박쥐는 낮보다 밤에 다른 동물로부터 공격을 더 많이 받습니다. 그 이유는 무엇일까요?</p>
             <p style="margin-top: 1em;"><strong>답:</strong> 박쥐는 밤에 주로 활동하기 때문이다.</p>
             <p style="margin-top: 0.75em;"><strong>해설:</strong> 지문에 따르면 박쥐는 낮에는 동굴이나 나무 속에서 거꾸로 매달린 채 휴식을 취한다. 이때 높은 곳에 숨어 있기 때문에 천적으로부터 발견되기 어렵다. 반면 밤에는 먹이를 찾기 위해 활발히 이동하며 활동하기 때문에 외부에 노출되는 시간이 길어지고, 그 결과 다른 동물의 공격을 받을 가능성이 높아진다. 따라서 박쥐는 활동이 많은 밤에 더 자주 공격을 받는다.</p>
@@ -2077,7 +2423,7 @@ function setReviewInstructionCondition4Page2() {
     if (!content) return;
     content.innerHTML = `
         <p>단, 이번에는 'AI 챗봇'을 사용하며 지문을 학습할 수 있습니다.</p>
-        <p>AI 챗봇은 지문에 관련된 답을 하도록 설정되어 있으며, 원하는 방식대로 자유롭게 사용할 수 있습니다.</p>
+        <p>AI 챗봇은 학습 자료를 중심으로 하되, ChatGPT처럼 자유롭게 질문하고 탐색할 수 있습니다.</p>
         <p>다만, 실험 페이지 내부가 아닌 외부의 다른 AI를 사용하는 것은 삼가주세요.</p>
     `;
 }
@@ -2339,12 +2685,25 @@ function submitDistractorAnswer() {
     
     const dStart = sessionState.distractorProblemShownAt;
     const dNow = Date.now();
+    const d = experimentData.distractor;
+    const attempted = d.totalCount;
+    const correct = d.correctCount;
+    const incorrect = d.wrongCount;
+    const accuracy = attempted > 0 ? correct / attempted : null;
     saveExperimentEvent({
-        page_name: `distractor_trial_${experimentData.distractor.totalCount}`,
-        block_name: 'distractor',
-        response_value: String(userAnswer),
+        page_name: 'distractor_page',
+        block_name: 'answer_submit',
+        event_type: 'answer_submit',
+        item_id: `distractor_${attempted}`,
+        participant_answer: String(userAnswer),
         correct_answer: String(currentDistractorProblem.answer),
+        correctness: !!currentDistractorProblem.correct,
+        response_value: String(userAnswer),
         is_correct: !!currentDistractorProblem.correct,
+        distractor_total_attempted_count: attempted,
+        distractor_correct_count: correct,
+        distractor_incorrect_count: incorrect,
+        distractor_accuracy: accuracy,
         time_spent: dStart != null ? Math.round(dNow - dStart) : null,
         start_time: dStart != null ? experimentSheetTimestamp(dStart) : null,
         end_time: experimentSheetTimestamp(dNow),
@@ -2358,10 +2717,10 @@ function submitDistractorAnswer() {
     }
 }
 
-// AI 챗봇(Worker 전용): POST { sessionId, message } — 백엔드에서 OpenAI conversation 유지
+// AI 챗봇(Vercel /api/chat): POST { session_id, message, messages } — 서버에서 OpenAI 호출
 const CHAT_ERROR_USER_MESSAGE = 'AI가 응답하지 않습니다.';
 
-function extractWorkerChatReply(data) {
+function extractChatApiReply(data) {
     if (!data || typeof data !== 'object') return '';
     if (typeof data.reply !== 'string') return '';
     const reply = data.reply.trim();
@@ -2470,8 +2829,8 @@ async function sendChatMessage(message) {
         const dwellTimeMs =
             sessionState.lastStageEnterAt != null ? Math.round(Date.now() - sessionState.lastStageEnterAt) : 0;
         const openAiMessages = buildWorkerOpenAiMessagesLast30();
-        const sheetRows = buildUnsyncedSheetRowsForWorker();
-        const { data, aiResponse, endpoint } = await requestChatToWorker(
+        const sheetRows = buildUnsyncedSheetRowsForChatApi();
+        const { data, aiResponse, endpoint } = await requestChatApi(
             message,
             dwellTimeMs,
             openAiMessages,
@@ -2513,9 +2872,10 @@ async function sendChatMessage(message) {
         if (loadingEl) {
             loadingEl.remove();
         }
-        console.warn('[chat] request failed', {
+        console.error('[chat] request failed', {
             endpoint: getChatEndpointLabel(),
-            reason: error && error.message ? error.message : String(error)
+            message: error && error.message ? error.message : String(error),
+            error
         });
         
         const errorMsg = document.createElement('div');
@@ -2953,8 +3313,8 @@ function setupReviewInstruction() {
             <p>이 때, 다가올 최종 시험에 나올 만한 예상 시험 문제를 만들면서 공부하세요.</p>
             <p style="margin-top: 1em;">문제는 다음과 같이 구성해야 합니다:</p>
             <ul style="margin: 0.5em 0 0 1.25em; line-height: 1.6;">
-                <li>지문의 내용을 그대로 확인하는 사실 문제 3문제 이상</li>
-                <li>지문에 나온 개념을 활용하여 추론해야 하는 이해 문제 3문제 이상</li>
+                <li>지문의 내용을 그대로 확인하는 기억(사실) 문제 3문제 이상</li>
+                <li>지문에 나온 개념을 활용하여 추론해야 하는 응용(추론) 문제 3문제 이상</li>
             </ul>
             <p style="margin-top: 1em;">각 문제에 대해 반드시 다음을 함께 작성하세요:</p>
             <ol style="margin: 0.5em 0 0 1.25em; line-height: 1.6;">
@@ -2970,7 +3330,7 @@ function setupReviewInstruction() {
             <p>첫 번째 학습을 마쳤습니다.</p>
             <p>지금부터는 앞에서 공부했던 지문을 다시 학습합니다.</p>
             <p style="margin-top: 1em;">단, 이번에는 'AI 챗봇'을 사용하며 지문을 학습할 수 있습니다.</p>
-            <p>AI 챗봇은 지문에 관련된 답을 하도록 설정되어 있으며, 원하는 방식대로 자유롭게 사용할 수 있습니다.</p>
+            <p>AI 챗봇은 학습 자료를 중심으로 하되, ChatGPT처럼 자유롭게 질문하고 탐색할 수 있습니다.</p>
             <p>다만, 실험 페이지 내부가 아닌 외부의 다른 AI를 사용하는 것은 삼가주세요.</p>
         `;
     } else if (condition === 4) {
@@ -2981,8 +3341,8 @@ function setupReviewInstruction() {
             <p>이 때, 다가올 최종 시험에 나올 만한 예상 시험 문제를 만들면서 공부하세요.</p>
             <p style="margin-top: 1em;">문제는 다음과 같이 구성해야 합니다:</p>
             <ul style="margin: 0.5em 0 0 1.25em; line-height: 1.6;">
-                <li>지문의 내용을 그대로 확인하는 사실 문제 3문제 이상</li>
-                <li>지문에 나온 개념을 활용하여 추론해야 하는 이해 문제 3문제 이상</li>
+                <li>지문의 내용을 그대로 확인하는 기억(사실) 문제 3문제 이상</li>
+                <li>지문에 나온 개념을 활용하여 추론해야 하는 응용(추론) 문제 3문제 이상</li>
             </ul>
             <p style="margin-top: 1em;">각 문제에 대해 반드시 다음을 함께 작성하세요:</p>
             <ol style="margin: 0.5em 0 0 1.25em; line-height: 1.6;">
