@@ -118,6 +118,11 @@ const sessionState = {
     aiLiteracyQuestionStartedAt: null,
     /** Google Sheets에 이미 동기화된 chat 로그의 최대 message_order */
     lastSyncedChatLogOrder: 0,
+    /** 단계별 버튼 활성화 시각(ms). setTimeout 대신 Date 비교로 백그라운드 탭에서도 안정 동작 */
+    stageDelayUnlockAt: {},
+    stageDelayTimers: {},
+    /** 학습 타이머 완료 후 JOL1 중복 진입 방지 */
+    learningTimerCompleted: false,
 };
 
 /** 페이지별 체류·클릭 (participant_summary wide용) */
@@ -132,6 +137,200 @@ const pageMetricsState = {
 const collectedChatLogs = [];
 /** 시트에 쌓을 실험 행(문항·체류·방해과제 등) */
 const collectedExperimentRows = [];
+
+function clearStageDelayTimer(key) {
+    const timerId = sessionState.stageDelayTimers?.[key];
+    if (timerId) {
+        clearInterval(timerId);
+        delete sessionState.stageDelayTimers[key];
+    }
+}
+
+function getStageDelayRemainingSec(key) {
+    const unlockAt = sessionState.stageDelayUnlockAt?.[key];
+    if (!unlockAt) return 0;
+    return Math.max(0, Math.ceil((unlockAt - Date.now()) / 1000));
+}
+
+function isStageDelayActive(key) {
+    return getStageDelayRemainingSec(key) > 0;
+}
+
+function scheduleStageDelay(key, delayMs, onReady, onTick) {
+    clearStageDelayTimer(key);
+    if (!sessionState.stageDelayUnlockAt) sessionState.stageDelayUnlockAt = {};
+    if (!sessionState.stageDelayTimers) sessionState.stageDelayTimers = {};
+
+    const unlockAt = Date.now() + delayMs;
+    sessionState.stageDelayUnlockAt[key] = unlockAt;
+
+    const tick = () => {
+        const remainingSec = getStageDelayRemainingSec(key);
+        if (remainingSec <= 0) {
+            clearStageDelayTimer(key);
+            delete sessionState.stageDelayUnlockAt[key];
+            if (onReady) onReady();
+            return;
+        }
+        if (onTick) onTick(remainingSec);
+    };
+
+    tick();
+    sessionState.stageDelayTimers[key] = setInterval(tick, 500);
+}
+
+function completeLearningStage() {
+    stopTimer('learning');
+
+    if (sessionState.learningTimerCompleted) {
+        if (currentStage !== 'jol1') {
+            showStage('jol1');
+        }
+        return;
+    }
+    sessionState.learningTimerCompleted = true;
+
+    experimentData.learning.endTime = experimentSheetTimestamp();
+    const start = new Date(experimentData.learning.startTime);
+    const end = new Date(experimentData.learning.endTime);
+    experimentData.learning.duration = (end - start) / 1000;
+    saveExperimentEvent({
+        page_name: 'learning',
+        block_name: 'learning',
+        event_type: 'learning_timer_completed',
+        response_value: 'timer_completed',
+        time_spent: Math.round(end - start),
+        start_time: experimentData.learning.startTime,
+        end_time: experimentData.learning.endTime,
+        is_correct: null,
+    });
+
+    showStage('jol1');
+    const jol1Input = document.getElementById('jol1-input');
+    if (jol1Input) {
+        jol1Input.value = '';
+        setTimeout(() => jol1Input.focus(), 0);
+    }
+}
+
+function setupReviewInstructionNextDelay() {
+    const btn = document.getElementById('review-instruction-next-btn');
+    if (!btn) return;
+
+    clearStageDelayTimer('reviewInstructionNext');
+    delete sessionState.stageDelayUnlockAt?.reviewInstructionNext;
+
+    if (experimentData.condition !== 1) {
+        btn.disabled = false;
+        btn.textContent = '다음';
+        return;
+    }
+
+    btn.disabled = true;
+    scheduleStageDelay(
+        'reviewInstructionNext',
+        60000,
+        () => {
+            btn.disabled = false;
+            btn.textContent = '다음';
+        },
+        (remainingSec) => {
+            btn.textContent = `다음 (${remainingSec}초)`;
+        }
+    );
+}
+
+function setupReviewToSurveyDelay() {
+    const btn = document.getElementById('review-to-survey-btn');
+    if (!btn) return;
+
+    clearStageDelayTimer('reviewToSurvey');
+    delete sessionState.stageDelayUnlockAt?.reviewToSurvey;
+    btn.style.display = 'none';
+
+    const condition = experimentData.condition;
+    if (condition !== 1 && condition !== 3) return;
+
+    scheduleStageDelay('reviewToSurvey', 60000, () => {
+        if (currentStage === 'review') {
+            btn.style.display = 'inline-block';
+        }
+    });
+}
+
+const REQUIRED_RESPONSE_ALERT_MSG = '빈 부분을 모두 응답해 주세요.';
+
+function alertRequiredResponse() {
+    alert(REQUIRED_RESPONSE_ALERT_MSG);
+}
+
+function isNonEmptyText(value) {
+    return String(value ?? '').trim().length > 0;
+}
+
+function validateReviewBeforeProceed() {
+    const condition = experimentData.condition;
+
+    if (condition === 1) {
+        const notes = document.getElementById('relearning-notes');
+        const relearningMode = document.getElementById('relearning-mode');
+        const relearningVisible =
+            relearningMode &&
+            relearningMode.style.display !== 'none' &&
+            relearningMode.offsetParent !== null;
+        if (relearningVisible && notes && !isNonEmptyText(notes.value)) {
+            alertRequiredResponse();
+            notes.focus();
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function validateFinalTestAnswerAtIndex(index) {
+    const questions = experimentData.finalTest.questions || finalTestQuestions;
+    const q = questions[index];
+    if (!q) return false;
+    const answerInput = document.getElementById(`test-q${q.number}`);
+    if (!answerInput || !isNonEmptyText(answerInput.value)) {
+        alertRequiredResponse();
+        if (answerInput) answerInput.focus();
+        return false;
+    }
+    return true;
+}
+
+function validateAllFinalTestAnswers() {
+    const questions = experimentData.finalTest.questions || finalTestQuestions;
+    for (let i = 0; i < questions.length; i++) {
+        const q = questions[i];
+        const answerInput = document.getElementById(`test-q${q.number}`);
+        if (!answerInput || !isNonEmptyText(answerInput.value)) {
+            alertRequiredResponse();
+            showQuestion(i);
+            if (answerInput) answerInput.focus();
+            return false;
+        }
+    }
+    return true;
+}
+
+function validatePostSurveyStep(index) {
+    if (index === 0) {
+        return !!document.querySelector('input[name="post-survey-q1"]:checked');
+    }
+    if (index === 1) {
+        const q2 = document.getElementById('post-survey-q2');
+        const v = q2 ? parseInt(String(q2.value || '').trim(), 10) : NaN;
+        return !isNaN(v) && v >= 0 && v <= 100;
+    }
+    if (index === 2) {
+        const q3 = document.getElementById('post-survey-q3');
+        return isNonEmptyText(q3 ? q3.value : '');
+    }
+    return true;
+}
 
 function initSessionId() {
     const rand = Math.random().toString(36).slice(2, 10);
@@ -1242,12 +1441,7 @@ function setupReviewStage() {
     // 복습 상단 바 '다음 단계로': 조건 1·3만 1분 후 표시 (조건 2·4는 문제 7에서 '제출' 사용)
     const reviewToSurveyBtn = document.getElementById('review-to-survey-btn');
     if (reviewToSurveyBtn) reviewToSurveyBtn.style.display = 'none';
-    if (condition === 1 || condition === 3) {
-        setTimeout(() => {
-            const btn = document.getElementById('review-to-survey-btn');
-            if (btn && currentStage === 'review') btn.style.display = 'inline-block';
-        }, 60000);
-    }
+    setupReviewToSurveyDelay();
 
     setupQuestionTypeExclusiveCheckboxes();
 }
@@ -1366,8 +1560,12 @@ function validateAndSaveCurrentPair() {
     const understandCb = document.getElementById('question-type-understand');
     const typeFact = !!(factCb && factCb.checked);
     const typeUnderstand = !!(understandCb && understandCb.checked);
-    if (!typeFact && !typeUnderstand) {
-        alert("이 문제가 '기억(사실)'인지 '응용(추론)'인지 하나만 체크해 주세요.");
+
+    if (!question || !answer || !explanation || (!typeFact && !typeUnderstand)) {
+        alertRequiredResponse();
+        if (!question && currentQuestion) currentQuestion.focus();
+        else if (!answer && currentAnswer) currentAnswer.focus();
+        else if (!explanation && currentExplanation) currentExplanation.focus();
         return false;
     }
 
@@ -1481,17 +1679,25 @@ function switchToAnswerWriting() {
     const questions = [];
     questionInputs.forEach((input, index) => {
         const questionText = input.value.trim();
-        if (questionText) {
-            questions.push({
-                number: index + 1,
-                question: questionText
-            });
+        if (!questionText) {
+            return;
         }
+        questions.push({
+            number: index + 1,
+            question: questionText
+        });
     });
     
+    if (questionInputs.length > 0 && questions.length !== questionInputs.length) {
+        alertRequiredResponse();
+        const firstEmpty = Array.from(questionInputs).find((input) => !input.value.trim());
+        if (firstEmpty) firstEmpty.focus();
+        return;
+    }
+
     // 최소 1개 이상의 질문이 있어야 함
     if (questions.length === 0) {
-        alert('최소 1개 이상의 질문을 입력해주세요.');
+        alertRequiredResponse();
         return;
     }
     
@@ -2399,6 +2605,7 @@ function stopTimer(timerId) {
 
 // 지문 학습 단계
 function startLearningStage() {
+    sessionState.learningTimerCompleted = false;
     showStage('learning');
     const timerDisplay = document.getElementById('learning-timer');
     const timerFloatDisplay = document.getElementById('learning-timer-float-display');
@@ -2406,21 +2613,7 @@ function startLearningStage() {
     experimentData.learning.startTime = experimentSheetTimestamp();
 
     startTimer('learning', 360, [timerDisplay, timerFloatDisplay].filter(Boolean), () => {
-        // 시간이 지나면 자동으로 다음 단계로
-        experimentData.learning.endTime = experimentSheetTimestamp();
-        const start = new Date(experimentData.learning.startTime);
-        const end = new Date(experimentData.learning.endTime);
-        experimentData.learning.duration = (end - start) / 1000;
-        saveExperimentEvent({
-            page_name: 'learning',
-            block_name: 'learning',
-            response_value: 'timer_completed',
-            time_spent: Math.round(end - start),
-            start_time: experimentData.learning.startTime,
-            end_time: experimentData.learning.endTime,
-            is_correct: null,
-        });
-        startReviewStage();
+        completeLearningStage();
     });
 }
 
@@ -2491,17 +2684,7 @@ function startReviewStage() {
     if (experimentData.condition) {
         setupReviewInstruction();
         showStage('review-instruction');
-        const reviewNextBtn = document.getElementById('review-instruction-next-btn');
-        if (reviewNextBtn) reviewNextBtn.disabled = false;
-        // 조건 1(지문 재학습): '다음' 버튼은 1분 후 활성화
-        if (experimentData.condition === 1) {
-            if (reviewNextBtn) {
-                reviewNextBtn.disabled = true;
-                setTimeout(() => {
-                    reviewNextBtn.disabled = false;
-                }, 60000);
-            }
-        }
+        setupReviewInstructionNextDelay();
     } else {
         // 설계자 모드에서 조건이 없을 때는 바로 복습 화면으로
         showStage('review');
@@ -2712,9 +2895,17 @@ function submitDistractorAnswer() {
     if (!answerInput) {
         return;
     }
+
+    if (!isNonEmptyText(answerInput.value)) {
+        alertRequiredResponse();
+        answerInput.focus();
+        return;
+    }
     
-    const userAnswer = parseInt(answerInput.value);
+    const userAnswer = parseInt(answerInput.value, 10);
     if (isNaN(userAnswer)) {
+        alertRequiredResponse();
+        answerInput.focus();
         return;
     }
     
@@ -2842,6 +3033,14 @@ function setAssistantMessageBody(wrapEl, text, opts) {
 }
 
 async function sendChatMessage(message) {
+    const text = String(message ?? '').trim();
+    if (!text) {
+        alertRequiredResponse();
+        const chatInput = document.getElementById('chat-input');
+        if (chatInput) chatInput.focus();
+        return;
+    }
+
     const chatMessages = document.getElementById('chat-messages');
     const chatInput = document.getElementById('chat-input');
     const sendBtn = document.getElementById('send-btn');
@@ -2849,10 +3048,10 @@ async function sendChatMessage(message) {
     // 사용자 메시지 표시
     const userMsg = document.createElement('div');
     userMsg.className = 'chat-message user';
-    userMsg.textContent = message;
+    userMsg.textContent = text;
     chatMessages.appendChild(userMsg);
     chatMessages.scrollTop = chatMessages.scrollHeight;
-    saveChatLog('user', message, currentStage);
+    saveChatLog('user', text, currentStage);
     
     // 입력 필드와 버튼 비활성화
     if (chatInput) {
@@ -2878,7 +3077,7 @@ async function sendChatMessage(message) {
         const openAiMessages = buildWorkerOpenAiMessagesLast30();
         const sheetRows = buildUnsyncedSheetRowsForChatApi();
         const { data, aiResponse, endpoint } = await requestChatApi(
-            message,
+            text,
             dwellTimeMs,
             openAiMessages,
             sheetRows
@@ -2909,7 +3108,7 @@ async function sendChatMessage(message) {
 
         // 채팅 메시지 저장
         experimentData.review.chatMessages.push({
-            user: message,
+            user: text,
             ai: aiResponse,
             timestamp: experimentSheetTimestamp()
         });
@@ -2938,7 +3137,7 @@ async function sendChatMessage(message) {
         });
         
         experimentData.review.chatMessages.push({
-            user: message,
+            user: text,
             ai: CHAT_ERROR_USER_MESSAGE,
             timestamp: experimentSheetTimestamp()
         });
@@ -3398,12 +3597,33 @@ function setupReviewInstruction() {
     }
 }
 
+function closeExperimentPage() {
+    submitAllDataToBackend({ silent: true });
+
+    window.close();
+
+    // 스크립트로 연 탭이 아니면 close()가 막히는 경우가 많음
+    setTimeout(() => {
+        try {
+            window.open('', '_self', '');
+            window.close();
+        } catch {
+            /* ignore */
+        }
+        setTimeout(() => {
+            if (!window.closed) {
+                window.location.replace('about:blank');
+            }
+        }, 150);
+    }, 0);
+}
+
 // 실험 시작 버튼 클릭 처리 (참가자 번호 입력 후 도입으로 이동)
 function onExperimentStartClick() {
     const input = document.getElementById('participant-id-input');
     const participantId = input ? input.value.trim() : '';
     if (!participantId) {
-        alert('참가자 번호를 입력해 주세요.');
+        alertRequiredResponse();
         if (input) input.focus();
         return;
     }
@@ -3461,13 +3681,13 @@ document.addEventListener('DOMContentLoaded', () => {
         jol1NextBtn.addEventListener('click', () => {
             const val = jol1Input.value.trim();
             if (val === '') {
-                alert('0~100 사이의 값을 입력해 주세요.');
+                alertRequiredResponse();
                 jol1Input.focus();
                 return;
             }
             const num = parseInt(val, 10);
             if (isNaN(num) || num < 0 || num > 100) {
-                alert('0~100 사이의 숫자를 입력해 주세요.');
+                alertRequiredResponse();
                 jol1Input.focus();
                 return;
             }
@@ -3501,6 +3721,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // 복습 안내 다음 버튼
     document.getElementById('review-instruction-next-btn').addEventListener('click', () => {
         const condition = experimentData.condition;
+        if (condition === 1 && isStageDelayActive('reviewInstructionNext')) {
+            alert(`다음 버튼은 ${getStageDelayRemainingSec('reviewInstructionNext')}초 후 활성화됩니다.`);
+            return;
+        }
         const reviewNextBtn = document.getElementById('review-instruction-next-btn');
         const content = document.getElementById('review-instruction-content');
         // 조건 2(지문+질문생성): 1페이지 → 2페이지(객관식 예시) → 3페이지(주관식 예시) → 4페이지 → 복습 화면
@@ -3529,6 +3753,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (condition === 3 && reviewInstructionStep === 1) {
             reviewInstructionStep = 2;
             setReviewInstructionCondition3Page2();
+            setupReviewInstructionNextDelay();
             return;
         }
         if (condition === 3 && reviewInstructionStep === 2) {
@@ -3573,6 +3798,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const reviewToSurveyBtn = document.getElementById('review-to-survey-btn');
     if (reviewToSurveyBtn) {
         reviewToSurveyBtn.addEventListener('click', () => {
+            if (!validateReviewBeforeProceed()) return;
             showStage('survey-instruction');
         });
     }
@@ -3608,7 +3834,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const major = document.getElementById('demographics-major').value.trim();
         
         if (!age || !gender || !major) {
-            alert('모든 항목을 입력해주세요.');
+            alertRequiredResponse();
             return;
         }
         
@@ -3636,14 +3862,14 @@ document.addEventListener('DOMContentLoaded', () => {
         const gifticonOption = document.querySelector('input[name="gifticon-option"]:checked');
         
         if (!gifticonOption) {
-            alert('기프티콘 수령 여부를 선택해주세요.');
+            alertRequiredResponse();
             return;
         }
         
         if (gifticonOption.value === 'phone') {
             const phone = document.getElementById('gifticon-phone').value.trim();
             if (!phone) {
-                alert('핸드폰 번호를 입력해주세요.');
+                alertRequiredResponse();
                 return;
             }
             experimentData.gifticon = {
@@ -3670,7 +3896,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // 설문 다음 버튼
     document.getElementById('survey-next-btn').addEventListener('click', () => {
         if (!validateSurveyStep(currentSurveyIndex)) {
-            alert('필수 응답 항목입니다');
+            alertRequiredResponse();
             return;
         }
         clearSurveyValidationMsg();
@@ -3683,7 +3909,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // 설문 완료 버튼
     document.getElementById('survey-submit-btn').addEventListener('click', () => {
         if (!validateSurveyStep(currentSurveyIndex)) {
-            alert('필수 응답 항목입니다');
+            alertRequiredResponse();
             return;
         }
         clearSurveyValidationMsg();
@@ -3719,11 +3945,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (aiLitNextBtn) {
         aiLitNextBtn.addEventListener('click', () => {
             if (!validateAiLiteracyStep(currentAiLiteracyIndex)) {
-                const val = document.getElementById('ai-literacy-validation-msg');
-                if (val) {
-                    val.textContent = '필수응답 항목입니다. 답변을 선택해 주세요.';
-                    val.style.display = 'block';
-                }
+                alertRequiredResponse();
                 return;
             }
             const val = document.getElementById('ai-literacy-validation-msg');
@@ -3738,11 +3960,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (aiLitSubmitBtn) {
         aiLitSubmitBtn.addEventListener('click', () => {
             if (!validateAiLiteracyStep(currentAiLiteracyIndex)) {
-                const val = document.getElementById('ai-literacy-validation-msg');
-                if (val) {
-                    val.textContent = '필수응답 항목입니다. 답변을 선택해 주세요.';
-                    val.style.display = 'block';
-                }
+                alertRequiredResponse();
                 return;
             }
             const val = document.getElementById('ai-literacy-validation-msg');
@@ -3779,6 +3997,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 최종 시험 다음 문제 버튼
     document.getElementById('test-next-btn').addEventListener('click', () => {
+        if (!validateFinalTestAnswerAtIndex(currentQuestionIndex)) return;
         const questions = experimentData.finalTest.questions || finalTestQuestions;
         if (currentQuestionIndex < questions.length - 1) {
             const cq = questions[currentQuestionIndex];
@@ -3789,6 +4008,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 최종 시험 제출 버튼
     document.getElementById('final-test-submit-btn').addEventListener('click', () => {
+        if (!validateAllFinalTestAnswers()) return;
         const questions = experimentData.finalTest.questions || finalTestQuestions;
         const curQ = questions[currentQuestionIndex];
         if (curQ) logFinalTestQuestionResponse(curQ.number);
@@ -3808,6 +4028,14 @@ document.addEventListener('DOMContentLoaded', () => {
         showStage('post-survey-intro');
     });
     
+    // 완료 화면 종료 버튼
+    const completionExitBtn = document.getElementById('completion-exit-btn');
+    if (completionExitBtn) {
+        completionExitBtn.addEventListener('click', () => {
+            closeExperimentPage();
+        });
+    }
+
     // 다운로드/업로드 (완료 화면에서 숨김·개발용으로만 사용 가능)
     const downloadBtn = document.getElementById('download-btn');
     if (downloadBtn) {
@@ -3839,9 +4067,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (sendBtn) {
         sendBtn.addEventListener('click', () => {
             if (chatInput && !chatInput.disabled) {
-                const message = chatInput.value.trim();
-                if (message) {
-                    sendChatMessage(message);
+                sendChatMessage(chatInput.value);
+                if (isNonEmptyText(chatInput.value)) {
                     chatInput.value = '';
                 }
             }
@@ -3860,6 +4087,10 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 사후질문 다음 버튼
     document.getElementById('post-survey-next-btn').addEventListener('click', () => {
+        if (!validatePostSurveyStep(currentPostSurveyIndex)) {
+            alertRequiredResponse();
+            return;
+        }
         if (currentPostSurveyIndex < 2) {
             logPostSurveyQuestionResponse(currentPostSurveyIndex + 1);
             showPostSurveyQuestion(currentPostSurveyIndex + 1);
@@ -3868,6 +4099,10 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 사후질문 제출 버튼
     document.getElementById('post-survey-submit-btn').addEventListener('click', () => {
+        if (!validatePostSurveyStep(currentPostSurveyIndex)) {
+            alertRequiredResponse();
+            return;
+        }
         logPostSurveyQuestionResponse(3);
         // 모든 답변 수집
         const answers = {};

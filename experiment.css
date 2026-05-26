@@ -1391,8 +1391,15 @@ h3 {
     color: white;
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
     background-color: #2980b9;
+}
+
+.btn-primary:disabled {
+    background-color: #a9cce3;
+    color: #f8fbff;
+    cursor: not-allowed;
+    opacity: 0.85;
 }
 
 .btn-secondary {
