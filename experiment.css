@@ -333,6 +333,10 @@ h3 {
     flex-direction: column;
 }
 
+.review-right:has(#question-generation-mode[style*="display: block"]) {
+    overflow: hidden;
+}
+
 .review-right.hidden {
     display: none !important;
 }
@@ -377,6 +381,10 @@ h3 {
 }
 #question-generation-mode .question-pair-next-row {
     flex-shrink: 0;
+    margin-top: auto;
+    padding-top: 12px;
+    display: flex;
+    justify-content: flex-end;
 }
 
 /* 조건 3: 재학습 모드에서 학습노트 숨기기 */

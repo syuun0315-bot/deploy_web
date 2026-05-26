@@ -175,8 +175,8 @@
                                 <textarea id="current-explanation" class="pair-input" placeholder="해설을 입력하세요..." rows="4"></textarea>
                             </div>
                         </div>
-                        <div class="question-pair-next-row" style="margin-top: 12px; display: flex; gap: 10px; justify-content: flex-end; flex-shrink: 0;">
-                            <button id="pair-next-btn" type="button" class="btn-primary btn-review-next-step">다음 문제</button>
+                        <div class="question-pair-next-row">
+                            <button id="pair-next-btn" type="button" class="btn-primary">다음 문제</button>
                         </div>
                     </div>
                 </div>
@@ -211,19 +211,6 @@
                     <button id="survey-next-btn" class="btn-primary">다음</button>
                     <button id="survey-submit-btn" class="btn-primary" style="display:none;">다음</button>
                 </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- 수학 과제 직전 안내 -->
-    <div id="math-preintro-screen" class="screen">
-        <div class="container">
-            <div class="instruction-content">
-                <div class="instruction-text">
-                    <p>지금부터 3분간 간단한 수학 문제를 풉니다.</p>
-                    <p>가능한 한 빠르고 정확하게 풀어주세요.</p>
-                </div>
-                <button id="math-preintro-next-btn" type="button" class="btn-primary">다음</button>
             </div>
         </div>
     </div>
@@ -462,7 +449,6 @@
                     <option value="review">6. 복습</option>
                     <option value="survey-instruction">7. 설문 안내</option>
                     <option value="survey">8. 설문</option>
-                    <option value="math-preintro">8-2. 수학 과제 안내</option>
                     <option value="distractor-instruction">9. 방해과제 안내</option>
                     <option value="distractor">10. 수학 과제</option>
                     <option value="ai-literacy-survey">10-2. AI 리터러시</option>
@@ -486,7 +472,6 @@
                 <button id="nav-review-question" class="nav-btn">복습:질문</button>
                 <button id="nav-review-answer" class="nav-btn">복습:답</button>
                 <button id="nav-survey" class="nav-btn">설문</button>
-                <button id="nav-math-preintro" class="nav-btn">수학안내</button>
                 <button id="nav-distractor-instruction" class="nav-btn">방해안내</button>
                 <button id="nav-distractor" class="nav-btn">수학과제</button>
                 <button id="nav-ai-literacy" class="nav-btn">AI리터러시</button>

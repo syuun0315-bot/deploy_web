@@ -1031,6 +1031,11 @@ function updateReviewStageBar() {
         bar.style.display = 'none';
         return;
     }
+    const condition = experimentData.condition;
+    if (condition === 2 || condition === 4) {
+        bar.style.display = 'none';
+        return;
+    }
     bar.style.display = 'flex';
     hintEl.textContent = '';
     hintEl.style.display = 'none';
@@ -1234,7 +1239,7 @@ function setupReviewStage() {
 
     updateReviewStageBar();
 
-    // 복습 상단 바 오른쪽 '다음 단계로': 조건 1·3은 1분 후, 조건 2·4는 showCurrentPair에서 문제 6 이상일 때 표시
+    // 복습 상단 바 '다음 단계로': 조건 1·3만 1분 후 표시 (조건 2·4는 문제 7에서 '제출' 사용)
     const reviewToSurveyBtn = document.getElementById('review-to-survey-btn');
     if (reviewToSurveyBtn) reviewToSurveyBtn.style.display = 'none';
     if (condition === 1 || condition === 3) {
@@ -1243,6 +1248,25 @@ function setupReviewStage() {
             if (btn && currentStage === 'review') btn.style.display = 'inline-block';
         }, 60000);
     }
+
+    setupQuestionTypeExclusiveCheckboxes();
+}
+
+// 질문생성: 기억(사실) / 응용(추론) 중 하나만 선택
+function setupQuestionTypeExclusiveCheckboxes() {
+    const factCb = document.getElementById('question-type-fact');
+    const understandCb = document.getElementById('question-type-understand');
+    if (!factCb || !understandCb || factCb.dataset.exclusiveBound === '1') return;
+
+    factCb.dataset.exclusiveBound = '1';
+    understandCb.dataset.exclusiveBound = '1';
+
+    factCb.addEventListener('change', () => {
+        if (factCb.checked) understandCb.checked = false;
+    });
+    understandCb.addEventListener('change', () => {
+        if (understandCb.checked) factCb.checked = false;
+    });
 }
 
 // 질문+답+해설 쌍 초기화
@@ -1258,6 +1282,7 @@ function initializeQuestionAnswerPair() {
     }
     
     // 현재 쌍 표시
+    setupQuestionTypeExclusiveCheckboxes();
     showCurrentPair();
 }
 
@@ -1272,12 +1297,14 @@ function showCurrentPair() {
         pairInfo.textContent = `문제 ${currentPairIndex + 1}`;
     }
     
-    // 조건 2, 4에서 문제 6 이상이면 상단 바에 '다음 단계로' 버튼 표시
-    const condition = (typeof experimentData !== 'undefined' && experimentData.condition) ? experimentData.condition : 0;
+    // 조건 2·4: 상단 '다음 단계로' 대신 하단 '다음 문제' / '제출' 버튼 사용
+    const condition = experimentData.condition;
     const reviewToSurveyBtn = document.getElementById('review-to-survey-btn');
     if (reviewToSurveyBtn && (condition === 2 || condition === 4)) {
-        reviewToSurveyBtn.style.display = currentPairIndex >= 5 ? 'inline-block' : 'none';
+        reviewToSurveyBtn.style.display = 'none';
     }
+
+    updateQuestionPairActionButton();
 
     // 현재 쌍 데이터가 있으면 표시, 없으면 빈 필드
     const currentQuestion = document.getElementById('current-question');
@@ -1305,15 +1332,25 @@ function showCurrentPair() {
     sessionState.reviewPairStartedAt = Date.now();
 }
 
-// 다음 쌍으로 이동
-function moveToNextPair() {
-    // 현재 쌍 데이터 저장
+function updateQuestionPairActionButton() {
+    const pairNextBtn = document.getElementById('pair-next-btn');
+    if (!pairNextBtn) return;
+
+    const condition = experimentData.condition;
+    const currentPairIndex = experimentData.review.currentPairIndex || 0;
+    if (condition !== 2 && condition !== 4) return;
+
+    pairNextBtn.style.display = 'inline-block';
+    pairNextBtn.textContent = currentPairIndex >= 6 ? '제출' : '다음 문제';
+}
+
+function validateAndSaveCurrentPair() {
     const currentQuestion = document.getElementById('current-question');
     const currentAnswer = document.getElementById('current-answer');
     const currentExplanation = document.getElementById('current-explanation');
-    
-    if (!currentQuestion || !currentAnswer || !currentExplanation) return;
-    
+
+    if (!currentQuestion || !currentAnswer || !currentExplanation) return false;
+
     const question = currentQuestion.value.trim();
     const answer = currentAnswer.value.trim();
     const explanation = currentExplanation.value.trim();
@@ -1323,34 +1360,26 @@ function moveToNextPair() {
     const typeFact = !!(factCb && factCb.checked);
     const typeUnderstand = !!(understandCb && understandCb.checked);
     if (!typeFact && !typeUnderstand) {
-        alert("이 문제가 '기억(사실)'인지 '응용(추론)'인지 체크해 주세요. (둘 다 해당되면 두 칸 모두 선택할 수 있습니다.)");
-        return;
+        alert("이 문제가 '기억(사실)'인지 '응용(추론)'인지 하나만 체크해 주세요.");
+        return false;
     }
-    
-    // 현재 쌍 데이터 저장 또는 업데이트
+
     const currentPairIndex = experimentData.review.currentPairIndex;
+    const pairData = {
+        number: currentPairIndex + 1,
+        question,
+        answer,
+        explanation,
+        typeFact,
+        typeUnderstand,
+    };
+
     if (experimentData.review.pairs[currentPairIndex]) {
-        // 기존 쌍 업데이트
-        experimentData.review.pairs[currentPairIndex] = {
-            number: currentPairIndex + 1,
-            question: question,
-            answer: answer,
-            explanation: explanation,
-            typeFact,
-            typeUnderstand,
-        };
+        experimentData.review.pairs[currentPairIndex] = pairData;
     } else {
-        // 새 쌍 추가
-        experimentData.review.pairs.push({
-            number: currentPairIndex + 1,
-            question: question,
-            answer: answer,
-            explanation: explanation,
-            typeFact,
-            typeUnderstand,
-        });
+        experimentData.review.pairs.push(pairData);
     }
-    
+
     const pairStart = sessionState.reviewPairStartedAt;
     const nowMs = Date.now();
     const canonicalQgPage = resolveCanonicalPageName('review');
@@ -1375,10 +1404,21 @@ function moveToNextPair() {
         end_time: experimentSheetTimestamp(nowMs),
         is_correct: null,
     });
-    
-    // 다음 쌍으로 이동
+
+    return true;
+}
+
+// 다음 쌍으로 이동
+function moveToNextPair() {
+    if (!validateAndSaveCurrentPair()) return;
+
     experimentData.review.currentPairIndex++;
     showCurrentPair();
+}
+
+function submitQuestionGenerationReview() {
+    if (!validateAndSaveCurrentPair()) return;
+    showStage('survey-instruction');
 }
 
 // 질문 항목 추가
@@ -3065,8 +3105,6 @@ function developerModeGoToStage(stage) {
         showStage('survey');
         experimentData.survey.startTime = experimentSheetTimestamp();
         setTimeout(() => setupSurvey(), 100);
-    } else if (stage === 'math-preintro') {
-        showStage('math-preintro');
     } else if (stage === 'distractor-instruction') {
         showStage('distractor-instruction');
     } else if (stage === 'distractor') {
@@ -3134,7 +3172,6 @@ function updateActiveNavButton() {
         'review': 'nav-review-question',
         'survey-instruction': 'nav-survey',
         'survey': 'nav-survey',
-        'math-preintro': 'nav-math-preintro',
         'distractor-instruction': 'nav-distractor-instruction',
         'distractor': 'nav-distractor',
         'ai-literacy-survey': 'nav-ai-literacy',
@@ -3189,7 +3226,6 @@ function setupDesignerNavigation() {
         'nav-jol1': 'jol1',
         'nav-review-instruction': 'review-instruction',
         'nav-survey': 'survey',
-        'nav-math-preintro': 'math-preintro',
         'nav-distractor-instruction': 'distractor-instruction',
         'nav-distractor': 'distractor',
         'nav-ai-literacy': 'ai-literacy-survey',
@@ -3544,13 +3580,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    const mathPreintroNextBtn = document.getElementById('math-preintro-next-btn');
-    if (mathPreintroNextBtn) {
-        mathPreintroNextBtn.addEventListener('click', () => {
-            showStage('distractor-instruction');
-        });
-    }
-
     // 방해과제 안내 다음 버튼
     document.getElementById('distractor-instruction-next-btn').addEventListener('click', () => {
         setupDistractorTask();
@@ -3674,8 +3703,8 @@ document.addEventListener('DOMContentLoaded', () => {
             experimentData.survey.duration = Math.floor((end - start) / 1000);
         }
         
-        // 다음 단계로 이동 (수학 과제 직전 안내)
-        showStage('math-preintro');
+        // 다음 단계로 이동 (방해과제 안내)
+        showStage('distractor-instruction');
     });
 
     const aiLitNextBtn = document.getElementById('ai-literacy-next-btn');
@@ -3786,7 +3815,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const pairNextBtn = document.getElementById('pair-next-btn');
     if (pairNextBtn) {
         pairNextBtn.addEventListener('click', () => {
-            moveToNextPair();
+            const condition = experimentData.condition;
+            const idx = experimentData.review.currentPairIndex || 0;
+            if ((condition === 2 || condition === 4) && idx >= 6) {
+                submitQuestionGenerationReview();
+            } else {
+                moveToNextPair();
+            }
         });
     }
     
