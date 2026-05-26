@@ -1,3 +1,11 @@
 {
-  "version": 2
+  "version": 2,
+  "functions": {
+    "api/log.js": {
+      "includeFiles": "api/lib/**"
+    },
+    "api/chat.js": {
+      "includeFiles": "api/lib/**"
+    }
+  }
 }
