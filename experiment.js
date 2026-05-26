@@ -1334,6 +1334,7 @@ function showCurrentPair() {
 
 function updateQuestionPairActionButton() {
     const pairNextBtn = document.getElementById('pair-next-btn');
+    const pairSubmitBtn = document.getElementById('pair-submit-btn');
     if (!pairNextBtn) return;
 
     const condition = experimentData.condition;
@@ -1341,7 +1342,13 @@ function updateQuestionPairActionButton() {
     if (condition !== 2 && condition !== 4) return;
 
     pairNextBtn.style.display = 'inline-block';
-    pairNextBtn.textContent = currentPairIndex >= 6 ? '제출' : '다음 문제';
+    pairNextBtn.textContent = '다음 문제';
+
+    if (pairSubmitBtn) {
+        const canSubmit = currentPairIndex >= 5;
+        pairSubmitBtn.hidden = !canSubmit;
+        pairSubmitBtn.style.display = canSubmit ? 'inline-block' : 'none';
+    }
 }
 
 function validateAndSaveCurrentPair() {
@@ -3811,17 +3818,17 @@ document.addEventListener('DOMContentLoaded', () => {
         uploadBtn.addEventListener('click', uploadData);
     }
     
-    // 질문+답+해설 쌍 다음 버튼
+    // 질문+답+해설 쌍 다음 / 제출 버튼
     const pairNextBtn = document.getElementById('pair-next-btn');
+    const pairSubmitBtn = document.getElementById('pair-submit-btn');
     if (pairNextBtn) {
         pairNextBtn.addEventListener('click', () => {
-            const condition = experimentData.condition;
-            const idx = experimentData.review.currentPairIndex || 0;
-            if ((condition === 2 || condition === 4) && idx >= 6) {
-                submitQuestionGenerationReview();
-            } else {
-                moveToNextPair();
-            }
+            moveToNextPair();
+        });
+    }
+    if (pairSubmitBtn) {
+        pairSubmitBtn.addEventListener('click', () => {
+            submitQuestionGenerationReview();
         });
     }
     
