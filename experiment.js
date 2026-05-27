@@ -229,7 +229,7 @@ function syncReviewNextStepDockVisibility() {
     const hintEl = document.getElementById('review-next-step-dock-hint');
     if (!dock) return;
 
-    const condition = experimentData.condition;
+    const condition = getExperimentCondition();
     const showDock = currentStage === 'review' && (condition === 1 || condition === 3);
 
     dock.hidden = !showDock;
@@ -250,7 +250,7 @@ function setupReviewToSurveyDelay() {
     clearStageDelayTimer('reviewToSurvey');
     delete sessionState.stageDelayUnlockAt?.reviewToSurvey;
 
-    const condition = experimentData.condition;
+    const condition = getExperimentCondition();
     if (condition !== 1 && condition !== 3) {
         syncReviewNextStepDockVisibility();
         btn.hidden = true;
@@ -298,7 +298,7 @@ function isNonEmptyText(value) {
 }
 
 function validateReviewBeforeProceed() {
-    const condition = experimentData.condition;
+    const condition = getExperimentCondition();
 
     if (condition === 1) {
         const notes = document.getElementById('relearning-notes');
@@ -590,7 +590,7 @@ async function requestChatApi(message, dwellTimeMs, openAiMessages, sheetRows) {
 }
 
 function getConditionLabel() {
-    const c = experimentData.condition;
+    const c = getExperimentCondition();
     if (c === 1) return 'text_reread';
     if (c === 2) return 'question_generation';
     if (c === 3) return 'AI_reread';
@@ -600,7 +600,7 @@ function getConditionLabel() {
 
 /** Supabase condition 컬럼 값 */
 function mapConditionToCode() {
-    const c = experimentData.condition;
+    const c = getExperimentCondition();
     if (c === 1) return 'restudy_text';
     if (c === 2) return 'qg_text';
     if (c === 3) return 'restudy_ai';
@@ -646,9 +646,9 @@ function resolveCanonicalPageName(stageKey, partialPageName) {
     }
     const stage = stageKey || currentStage;
     if (stage === 'review') {
-        const c = experimentData.condition;
+        const c = getExperimentCondition();
         if (c === 2) return 'review_qg_text';
-        if (c === 3 || c === 4) return 'review_qg_ai';
+        if (c === 4) return 'review_qg_ai';
         return 'review_page';
     }
     return STAGE_TO_CANONICAL_PAGE[stage] || 'instruction';
@@ -701,7 +701,7 @@ function buildSupabaseEventRow(partial) {
         page_dwell_time_ms: partial.page_dwell_time_ms ?? partial.time_spent ?? partial.dwell_time_ms ?? null,
         click_count: partial.click_count != null ? partial.click_count : null,
         input_value: partial.input_value != null ? String(partial.input_value) : partial.response_value != null ? String(partial.response_value) : null,
-        item_id: partial.item_id ?? null,
+        item_id: partial.item_id ?? resolveSurveyJolItemId(partial) ?? null,
         participant_answer: partial.participant_answer ?? null,
         correct_answer: partial.correct_answer ?? null,
         correctness: partial.correctness != null ? partial.correctness : partial.is_correct,
@@ -941,6 +941,69 @@ function recordStageDwellAndEnter(newStageKey) {
     rememberPageMetrics(newCanonical, enterIso, null, null, 0, null);
 }
 
+function padSurveyItemNum(n) {
+    return String(n).padStart(2, '0');
+}
+
+/** survey/JOL 이벤트용 item_id (Supabase experiment_events) */
+function resolveMidSurveyItemId(qNum) {
+    if (qNum >= 1 && qNum <= 7) return `mid_survey_likert_${padSurveyItemNum(qNum)}`;
+    if (qNum === 8) return 'mid_survey_expected_score';
+    return null;
+}
+
+function resolvePostSurveyItemId(qNum) {
+    if (qNum === 1) return 'post_survey_01';
+    if (qNum === 2) return 'post_survey_02';
+    if (qNum === 3) return 'post_survey_open_response';
+    return null;
+}
+
+function resolveAiLiteracyItemId(qNum) {
+    if (qNum >= 1 && qNum <= 3) return `ai_literacy_${padSurveyItemNum(qNum)}`;
+    return null;
+}
+
+function resolveJolItemId(jolNum) {
+    if (jolNum === 1) return 'jol_01';
+    if (jolNum === 2) return 'jol_02';
+    return null;
+}
+
+/** payload에 item_id가 없을 때 page_name/block_name으로 추론 (API 전송 전 보정) */
+function resolveSurveyJolItemId(partial) {
+    if (partial.item_id != null && String(partial.item_id).trim() !== '') {
+        return String(partial.item_id);
+    }
+
+    const block = String(partial.block_name || '').toLowerCase();
+    const page = String(partial.page_name || '').toLowerCase();
+
+    if (block === 'jol1' || page === 'jol1') return resolveJolItemId(1);
+    if (block === 'jol2' || page === 'jol2') return resolveJolItemId(2);
+    if (block === 'demographics' || page === 'demographics') return 'demographics_raw';
+
+    let match = page.match(/^survey_q(\d+)$/);
+    if (block === 'mid_survey' || match) {
+        const qNum = match ? parseInt(match[1], 10) : null;
+        if (qNum != null) return resolveMidSurveyItemId(qNum);
+    }
+
+    match = page.match(/^ai_literacy_q(\d+)$/);
+    if (block === 'ai_literacy_survey' || match) {
+        const qNum = match ? parseInt(match[1], 10) : null;
+        if (qNum != null) return resolveAiLiteracyItemId(qNum);
+    }
+
+    match = page.match(/^post_survey_q(\d+)$/);
+    if (block === 'post_survey' || match) {
+        const qNum = match ? parseInt(match[1], 10) : null;
+        if (qNum != null) return resolvePostSurveyItemId(qNum);
+    }
+
+    return null;
+}
+
 function getSurveyAnswerValue(qNum) {
     if (qNum >= 1 && qNum <= 7) {
         const el = document.querySelector(`input[name="survey-q${qNum}"]:checked`);
@@ -950,13 +1013,14 @@ function getSurveyAnswerValue(qNum) {
     return inp ? String(inp.value || '') : '';
 }
 
-/** 현재 보이는 설문 문항(1~9) 응답 + 체류 시간 로그 */
+/** 현재 보이는 설문 문항(1~8) 응답 + 체류 시간 로그 */
 function logSurveyQuestionResponse(qNum) {
     const start = sessionState.surveyQuestionStartedAt;
     const end = Date.now();
     saveExperimentEvent({
         page_name: `survey_q${qNum}`,
         block_name: 'mid_survey',
+        item_id: resolveMidSurveyItemId(qNum),
         response_value: getSurveyAnswerValue(qNum),
         time_spent: start != null ? Math.round(end - start) : null,
         start_time: start != null ? experimentSheetTimestamp(start) : null,
@@ -996,6 +1060,7 @@ function logPostSurveyQuestionResponse(qNum) {
     saveExperimentEvent({
         page_name: `post_survey_q${qNum}`,
         block_name: 'post_survey',
+        item_id: resolvePostSurveyItemId(qNum),
         response_value: getPostSurveyAnswerValue(qNum),
         time_spent: start != null ? Math.round(end - start) : null,
         start_time: start != null ? experimentSheetTimestamp(start) : null,
@@ -1158,8 +1223,43 @@ const saveExperimentData = saveExperimentEvent;
 /** 전체 제출 별칭 */
 const submitExperimentData = submitAllDataToBackend;
 
-// 조건 랜덤 배정 (1-4)
+// 개발자 모드 (단축키: Ctrl+Shift+D 또는 우측 하단 버튼)
+let designerMode = false;
+let designerCondition = null; // 개발자 모드에서 선택한 조건
+
+// 조건 랜덤 배정 (1-4) — 개발자 모드에서 이미 지정된 조건은 유지
+function normalizeCondition(value) {
+    const n = parseInt(value, 10);
+    return Number.isInteger(n) && n >= 1 && n <= 4 ? n : null;
+}
+
+function setExperimentCondition(value) {
+    const n = normalizeCondition(value);
+    if (n == null) return null;
+    experimentData.condition = n;
+    designerCondition = n;
+    return n;
+}
+
+function getExperimentCondition() {
+    return normalizeCondition(experimentData.condition);
+}
+
 function assignCondition() {
+    const existing = getExperimentCondition();
+    if (existing != null) {
+        experimentData.condition = existing;
+        if (!experimentData.startTime) {
+            experimentData.startTime = experimentSheetTimestamp();
+        }
+        return existing;
+    }
+    const fromDesigner = normalizeCondition(designerCondition);
+    if (fromDesigner != null) {
+        experimentData.condition = fromDesigner;
+        experimentData.startTime = experimentSheetTimestamp();
+        return fromDesigner;
+    }
     const condition = Math.floor(Math.random() * 4) + 1;
     experimentData.condition = condition;
     // 참가자 ID는 시작 화면에서 입력받음
@@ -1252,7 +1352,8 @@ function updateReviewStageBar() {
 
 // 복습 단계 설정
 function setupReviewStage() {
-    const condition = experimentData.condition;
+    const condition = getExperimentCondition();
+    if (condition != null) experimentData.condition = condition;
     const reviewLeft = document.querySelector('.review-left');
     const reviewCenter = document.querySelector('.review-center');
     const reviewRight = document.querySelector('.review-right');
@@ -1519,7 +1620,7 @@ function showCurrentPair() {
     }
     
     // 조건 2·4: 우측 하단 독 대신 '다음 문제' 아래 '다음 단계' 버튼 사용
-    const condition = experimentData.condition;
+    const condition = getExperimentCondition();
     const reviewToSurveyBtn = document.getElementById('review-to-survey-btn');
     if (reviewToSurveyBtn && (condition === 2 || condition === 4)) {
         reviewToSurveyBtn.hidden = true;
@@ -1558,7 +1659,7 @@ function updateQuestionPairActionButton() {
     const pairSubmitBtn = document.getElementById('pair-submit-btn');
     if (!pairNextBtn) return;
 
-    const condition = experimentData.condition;
+    const condition = getExperimentCondition();
     const currentPairIndex = experimentData.review.currentPairIndex || 0;
     if (condition !== 2 && condition !== 4) return;
 
@@ -2251,6 +2352,7 @@ function logAiLiteracyQuestionResponse(qNum) {
     saveExperimentEvent({
         page_name: `ai_literacy_q${qNum}`,
         block_name: 'ai_literacy_survey',
+        item_id: resolveAiLiteracyItemId(qNum),
         response_value: getAiLiteracyAnswerValue(qNum),
         time_spent: start != null ? Math.round(end - start) : null,
         start_time: start != null ? experimentSheetTimestamp(start) : null,
@@ -3286,10 +3388,6 @@ function uploadData() {
     };
 }
 
-// 개발자 모드 (단축키: Ctrl+Shift+D 또는 우측 하단 버튼)
-let designerMode = false;
-let designerCondition = null; // 개발자 모드에서 선택한 조건
-
 function toggleDesignerMode() {
     designerMode = !designerMode;
     const nav = document.getElementById('designer-nav');
@@ -3304,7 +3402,7 @@ function toggleDesignerMode() {
         // 현재 실험 조건을 드롭다운에 설정
         if (experimentData.condition) {
             const sel = document.getElementById('condition-select');
-            if (sel) sel.value = experimentData.condition;
+            if (sel) sel.value = String(getExperimentCondition() || experimentData.condition);
         }
     } else {
         nav.classList.remove('show');
@@ -3326,11 +3424,11 @@ function developerModeGoToStage(stage) {
     } else if (stage === 'learning') {
         startLearningStage();
     } else if (stage === 'review-instruction') {
-        if (!experimentData.condition) experimentData.condition = 1;
+        if (!getExperimentCondition()) setExperimentCondition(designerCondition || 1);
         setupReviewInstruction();
         showStage('review-instruction');
     } else if (stage === 'review') {
-        if (!experimentData.condition) experimentData.condition = 2;
+        if (!getExperimentCondition()) setExperimentCondition(designerCondition || 2);
         experimentData.review.questionStage = 'question';
         showStage('review');
         setupReviewStage();
@@ -3381,7 +3479,7 @@ function syncDevPageSelect() {
 }
 
 function updateDesignerInfo() {
-    const currentCondition = designerCondition || experimentData.condition;
+    const currentCondition = getExperimentCondition() || normalizeCondition(designerCondition);
     const conditionNames = {
         1: '조건1 - 재학습-self',
         2: '조건2 - QG-self',
@@ -3438,16 +3536,18 @@ function updateActiveNavButton() {
 }
 
 function applyDesignerCondition() {
-    const selectedValue = parseInt(document.getElementById('condition-select').value);
-    
+    const select = document.getElementById('condition-select');
+    const selectedValue = normalizeCondition(select ? select.value : null);
+
     if (selectedValue) {
-        designerCondition = selectedValue;
-        experimentData.condition = selectedValue;
+        setExperimentCondition(selectedValue);
         updateDesignerInfo();
-        
-        // 복습 화면이 현재 활성화되어 있다면 조건에 맞게 업데이트
+
+        // 복습/복습 안내 화면이면 조건에 맞게 즉시 반영
         if (currentStage === 'review') {
             setupReviewStage();
+        } else if (currentStage === 'review-instruction') {
+            setupReviewInstruction();
         }
     }
 }
@@ -3515,7 +3615,7 @@ function setupDesignerNavigation() {
         navReviewQuestion.addEventListener('click', function() {
             if (designerMode) {
                 Object.keys(timers).forEach(key => stopTimer(key));
-                if (!experimentData.condition) experimentData.condition = 2;
+                if (!getExperimentCondition()) setExperimentCondition(designerCondition || 2);
                 experimentData.review.questionStage = 'question';
                 showStage('review');
                 setupReviewStage();
@@ -3532,7 +3632,7 @@ function setupDesignerNavigation() {
         navReviewAnswer.addEventListener('click', function() {
             if (designerMode) {
                 Object.keys(timers).forEach(key => stopTimer(key));
-                if (!experimentData.condition) experimentData.condition = 2;
+                if (!getExperimentCondition()) setExperimentCondition(designerCondition || 2);
                 const questionInputs = document.querySelectorAll('#questions-container .question-input');
                 const questions = [];
                 questionInputs.forEach((input, index) => {
@@ -3560,7 +3660,8 @@ function setupDesignerNavigation() {
 
 // 복습 안내 내용 설정 (조건에 따라)
 function setupReviewInstruction() {
-    const condition = experimentData.condition;
+    const condition = getExperimentCondition();
+    if (condition != null) experimentData.condition = condition;
     const content = document.getElementById('review-instruction-content');
     if (!content) return;
     // 조건 2, 3, 4는 여러 페이지 구성이므로 진입 시 항상 1페이지부터
@@ -3726,6 +3827,7 @@ document.addEventListener('DOMContentLoaded', () => {
             saveExperimentEvent({
                 page_name: 'jol1',
                 block_name: 'jol1',
+                item_id: resolveJolItemId(1),
                 response_value: String(num),
                 time_spent: jStart != null ? Math.round(jNow - jStart) : null,
                 start_time: jStart != null ? experimentSheetTimestamp(jStart) : null,
@@ -3749,7 +3851,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 복습 안내 다음 버튼
     document.getElementById('review-instruction-next-btn').addEventListener('click', () => {
-        const condition = experimentData.condition;
+        const condition = getExperimentCondition();
         const reviewNextBtn = document.getElementById('review-instruction-next-btn');
         const content = document.getElementById('review-instruction-content');
         // 조건 2(지문+질문생성): 1페이지 → 2페이지(객관식 예시) → 3페이지(주관식 예시) → 4페이지 → 복습 화면
@@ -3873,6 +3975,7 @@ document.addEventListener('DOMContentLoaded', () => {
         saveExperimentEvent({
             page_name: 'demographics',
             block_name: 'demographics',
+            item_id: 'demographics_raw',
             response_value: JSON.stringify({ age, gender: gender.value, major }),
             is_correct: null,
         });
@@ -4157,6 +4260,10 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 조건 적용 버튼
     document.getElementById('apply-condition').addEventListener('click', applyDesignerCondition);
+    const conditionSelect = document.getElementById('condition-select');
+    if (conditionSelect) {
+        conditionSelect.addEventListener('change', applyDesignerCondition);
+    }
 
     // 페이지 이탈 전 best-effort 저장 (실패해도 사용자 흐름에는 영향 없음)
     window.addEventListener('pagehide', () => {
