@@ -605,6 +605,7 @@ function mapConditionToCode() {
 
 const STAGE_TO_CANONICAL_PAGE = {
     'experiment-start': 'welcome',
+    'introduction': 'instruction',
     'pre-jol': 'instruction',
     'post-jol': 'instruction',
     'review-instruction': 'learning_instruction',
@@ -2135,7 +2136,7 @@ function setupSurvey() {
             scale: {
                 min: 1,
                 max: 7,
-                minLabel: '전혀 그렇지 않음',
+                minLabel: '전혀 그렇지 않다',
                 maxLabel: '매우 그렇다'
             }
         },
@@ -2147,7 +2148,7 @@ function setupSurvey() {
             scale: {
                 min: 1,
                 max: 7,
-                minLabel: '전혀 그렇지 않음',
+                minLabel: '전혀 그렇지 않다',
                 maxLabel: '매우 그렇다'
             }
         },
@@ -2159,7 +2160,7 @@ function setupSurvey() {
             scale: {
                 min: 1,
                 max: 7,
-                minLabel: '전혀 그렇지 않음',
+                minLabel: '전혀 그렇지 않다',
                 maxLabel: '매우 그렇다'
             }
         },
@@ -2171,7 +2172,7 @@ function setupSurvey() {
             scale: {
                 min: 1,
                 max: 7,
-                minLabel: '전혀 그렇지 않음',
+                minLabel: '전혀 그렇지 않다',
                 maxLabel: '매우 그렇다'
             }
         },
@@ -2179,11 +2180,11 @@ function setupSurvey() {
             number: 5,
             type: 'scale',
             instruction: '다음 질문을 읽고, 해당하는 정도에 체크해주세요.',
-            question: '학습 활동을 하는 동안 스트레스를 느꼈다.',
+            question: '학습 활동을 하는 동안 스트레스를 받았다.',
             scale: {
                 min: 1,
                 max: 7,
-                minLabel: '전혀 그렇지 않음',
+                minLabel: '전혀 그렇지 않다',
                 maxLabel: '매우 그렇다'
             }
         },
@@ -2441,9 +2442,24 @@ function setupAiLiteracySurvey() {
     currentAiLiteracyIndex = 0;
 
     const items = [
-        { num: 1, text: '학습 상황에서 생성형 AI를 얼마나 자주 활용하나요?' },
-        { num: 2, text: '생성형 AI를 얼마나 능숙하게 사용하나요?' },
-        { num: 3, text: '생성형 AI가 자신의 학습에 도움이 된다고 생각하나요?' },
+        {
+            num: 1,
+            text: '학습 상황에서 생성형 AI를 얼마나 자주 활용하나요?',
+            minLabel: '전혀 사용하지 않는다',
+            maxLabel: '매우 자주 사용한다',
+        },
+        {
+            num: 2,
+            text: '생성형 AI를 얼마나 능숙하게 사용하나요?',
+            minLabel: '전혀 능숙하지 않다',
+            maxLabel: '매우 능숙하다',
+        },
+        {
+            num: 3,
+            text: '생성형 AI가 자신의 학습에 도움이 된다고 생각하나요?',
+            minLabel: '전혀 그렇지 않다',
+            maxLabel: '매우 그렇다',
+        },
     ];
 
     items.forEach((item) => {
@@ -2456,8 +2472,8 @@ function setupAiLiteracySurvey() {
             <div class="post-survey-question">${item.text}</div>
             <div class="scale-container">
                 <div class="scale-labels">
-                    <span class="scale-min">전혀 그렇지 않음</span>
-                    <span class="scale-max">매우 그렇다</span>
+                    <span class="scale-min">${item.minLabel}</span>
+                    <span class="scale-max">${item.maxLabel}</span>
                 </div>
                 <div class="scale-options">
         `;
@@ -3541,6 +3557,8 @@ function developerModeGoToStage(stage) {
     
     if (stage === 'experiment-start') {
         showStage('experiment-start');
+    } else if (stage === 'introduction') {
+        showStage('introduction');
     } else if (stage === 'pre-jol') {
         showStage('pre-jol');
     } else if (stage === 'post-jol') {
@@ -3614,6 +3632,7 @@ function updateActiveNavButton() {
     
     const stageToBtnId = {
         'experiment-start': 'nav-experiment-start',
+        'introduction': 'nav-introduction',
         'pre-jol': 'nav-pre-jol',
         'review-instruction': 'nav-review-instruction',
         'review': 'nav-review',
@@ -3664,6 +3683,7 @@ function applyDesignerCondition() {
 function setupDesignerNavigation() {
     const navButtons = {
         'nav-experiment-start': 'experiment-start',
+        'nav-introduction': 'introduction',
         'nav-pre-jol': 'pre-jol',
         'nav-review-instruction': 'review-instruction',
         'nav-review': 'review',
@@ -3764,7 +3784,7 @@ function onExperimentStartClick() {
         event_type: 'participant_start',
         metadata: withProtocolMetadata({ participant_id: participantId }),
     });
-    showStage('pre-jol');
+    showStage('introduction');
 }
 
 // 이벤트 리스너
@@ -3806,6 +3826,24 @@ document.addEventListener('DOMContentLoaded', () => {
             e.target.value = e.target.value.replace(/[^0-9]/g, '');
             const n = parseInt(e.target.value, 10);
             if (!isNaN(n) && n > 100) e.target.value = '100';
+        });
+    }
+
+    const introductionNextBtn = document.getElementById('introduction-next-btn');
+    if (introductionNextBtn) {
+        introductionNextBtn.addEventListener('click', () => {
+            const introStart = sessionState.lastStageEnterAt;
+            const introNow = Date.now();
+            saveExperimentEvent({
+                page_name: 'instruction',
+                block_name: 'introduction',
+                event_type: 'introduction_next',
+                time_spent: introStart != null ? Math.round(introNow - introStart) : null,
+                start_time: introStart != null ? experimentSheetTimestamp(introStart) : null,
+                end_time: experimentSheetTimestamp(introNow),
+                is_correct: null,
+            });
+            showStage('pre-jol');
         });
     }
 
