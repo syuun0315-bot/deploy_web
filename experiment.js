@@ -1,17 +1,23 @@
+// 실험 프로토콜 버전
+const PROTOCOL_VERSION = 'single_learning_prepost_jol_v1';
+const LEARNING_SESSION_DURATION_SEC = 600; // 10분
+
 // 실험 데이터 저장 객체
 const experimentData = {
     participantId: null,
     condition: null, // 1, 2, 3, 4
+    protocolVersion: PROTOCOL_VERSION,
     /** 실험 중 누적 클릭 수(개발자 패널 클릭 제외) */
     clickCount: 0,
     startTime: null,
     stageTimes: {},
+    preJol: null, // 학습 전 예측 점수 (0~100)
+    postJol: null, // 학습 후 예측 점수 (0~100)
     learning: {
         startTime: null,
         endTime: null,
         duration: 0
     },
-    jol1: null, // 학습 직후 예측 점수 (0~100)
     review: {
         startTime: null,
         endTime: null,
@@ -69,7 +75,7 @@ const experimentData = {
     }
 };
 
-/** 복습 화면 상단 바(모든 조건) 안내·복습 안내 마지막 페이지 강조에 동일 문구 사용 */
+/** 학습 세션 화면 상단 바 안내 문구 */
 // 최종 시험 문제 목록
 const finalTestQuestions = [
     { number: 1, question: "박쥐의 종류는 큰 박쥐류와 작은 박쥐류로 나뉩니다. 이중 작은 박쥐류는 전 세계에 서식하고 있습니다. 큰 박쥐류의 주요 서식지는 어디입니까?" },
@@ -121,8 +127,12 @@ const sessionState = {
     /** 단계별 버튼 활성화 시각(ms). setTimeout 대신 Date 비교로 백그라운드 탭에서도 안정 동작 */
     stageDelayUnlockAt: {},
     stageDelayTimers: {},
-    /** 학습 타이머 완료 후 JOL1 중복 진입 방지 */
-    learningTimerCompleted: false,
+    /** 학습 세션 타이머 완료 후 post-JOL 중복 진입 방지 */
+    learningSessionTimerCompleted: false,
+    /** AI 챗봇 턴 번호 (chat_turn_001 등) */
+    chatTurnCounter: 0,
+    /** 질문생성 Supabase 저장 완료된 item_id */
+    savedQgItemIds: {},
 };
 
 /** 페이지별 체류·클릭 (participant_summary wide용) */
@@ -179,38 +189,92 @@ function scheduleStageDelay(key, delayMs, onReady, onTick) {
     sessionState.stageDelayTimers[key] = setInterval(tick, 500);
 }
 
-function completeLearningStage() {
-    stopTimer('learning');
+function withProtocolMetadata(metadata) {
+    const base = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
+    base.protocol_version = PROTOCOL_VERSION;
+    return base;
+}
 
-    if (sessionState.learningTimerCompleted) {
-        if (currentStage !== 'jol1') {
-            showStage('jol1');
+function resolveLearningPageNameByCondition() {
+    const c = getExperimentCondition();
+    if (c === 1) return 'learning_self_restudy';
+    if (c === 2) return 'learning_self_qg';
+    if (c === 3) return 'learning_ai_restudy';
+    if (c === 4) return 'learning_ai_qg';
+    return 'learning_self_restudy';
+}
+
+function formatQgItemId(index) {
+    return `qg_${String(index + 1).padStart(3, '0')}`;
+}
+
+function isQgPairComplete(question, answer, explanation) {
+    return isNonEmptyText(question) && isNonEmptyText(answer) && isNonEmptyText(explanation);
+}
+
+function completeLearningSession() {
+    stopTimer('learning-session');
+
+    if (sessionState.learningSessionTimerCompleted) {
+        if (currentStage !== 'post-jol') {
+            showStage('post-jol');
         }
         return;
     }
-    sessionState.learningTimerCompleted = true;
+    sessionState.learningSessionTimerCompleted = true;
 
-    experimentData.learning.endTime = experimentSheetTimestamp();
-    const start = new Date(experimentData.learning.startTime);
-    const end = new Date(experimentData.learning.endTime);
-    experimentData.learning.duration = (end - start) / 1000;
+    const condition = getExperimentCondition();
+    if (condition === 2 || condition === 4) {
+        saveAllQuestionGenerationPairs({ fromTimer: true });
+    }
+
+    experimentData.review.endTime = experimentSheetTimestamp();
+    if (experimentData.review.startTime) {
+        const start = new Date(experimentData.review.startTime);
+        const end = new Date(experimentData.review.endTime);
+        experimentData.review.duration = (end - start) / 1000;
+    }
+
+    const learningPage = resolveLearningPageNameByCondition();
+    const enterMs = sessionState.learningSessionEnterAt;
+    const nowMs = Date.now();
     saveExperimentEvent({
-        page_name: 'learning',
-        block_name: 'learning',
-        event_type: 'learning_timer_completed',
+        page_name: learningPage,
+        block_name: 'learning_exit',
+        event_type: 'learning_exit',
         response_value: 'timer_completed',
-        time_spent: Math.round(end - start),
-        start_time: experimentData.learning.startTime,
-        end_time: experimentData.learning.endTime,
-        is_correct: null,
+        time_spent: enterMs != null ? Math.round(nowMs - enterMs) : null,
+        start_time: enterMs != null ? experimentSheetTimestamp(enterMs) : null,
+        end_time: experimentSheetTimestamp(nowMs),
+        metadata: withProtocolMetadata({ reason: 'timer_completed' }),
     });
 
-    showStage('jol1');
-    const jol1Input = document.getElementById('jol1-input');
-    if (jol1Input) {
-        jol1Input.value = '';
-        setTimeout(() => jol1Input.focus(), 0);
+    showStage('post-jol');
+    const postJolInput = document.getElementById('post-jol-input');
+    if (postJolInput) {
+        postJolInput.value = '';
+        setTimeout(() => postJolInput.focus(), 0);
     }
+}
+
+function startLearningSessionTimer() {
+    sessionState.learningSessionTimerCompleted = false;
+    sessionState.learningSessionEnterAt = Date.now();
+
+    const timerDisplay = document.getElementById('learning-session-timer');
+    const timerFloatDisplay = document.getElementById('learning-timer-float-display');
+    const displays = [timerDisplay, timerFloatDisplay].filter(Boolean);
+
+    saveExperimentEvent({
+        page_name: resolveLearningPageNameByCondition(),
+        block_name: 'learning_enter',
+        event_type: 'learning_enter',
+        metadata: withProtocolMetadata({ duration_sec: LEARNING_SESSION_DURATION_SEC }),
+    });
+
+    startTimer('learning-session', LEARNING_SESSION_DURATION_SEC, displays, () => {
+        completeLearningSession();
+    });
 }
 
 function resetReviewInstructionNextButton() {
@@ -225,66 +289,13 @@ function resetReviewInstructionNextButton() {
 
 function syncReviewNextStepDockVisibility() {
     const dock = document.getElementById('review-next-step-dock');
-    const btn = document.getElementById('review-to-survey-btn');
     const hintEl = document.getElementById('review-next-step-dock-hint');
     if (!dock) return;
-
-    const condition = getExperimentCondition();
-    const showDock = currentStage === 'review' && (condition === 1 || condition === 3);
-
-    dock.hidden = !showDock;
-    if (!showDock) {
-        if (btn) btn.hidden = true;
-        if (hintEl) {
-            hintEl.textContent = '';
-            hintEl.hidden = true;
-        }
-    }
-}
-
-function setupReviewToSurveyDelay() {
-    const btn = document.getElementById('review-to-survey-btn');
-    const hintEl = document.getElementById('review-next-step-dock-hint');
-    if (!btn) return;
-
-    clearStageDelayTimer('reviewToSurvey');
-    delete sessionState.stageDelayUnlockAt?.reviewToSurvey;
-
-    const condition = getExperimentCondition();
-    if (condition !== 1 && condition !== 3) {
-        syncReviewNextStepDockVisibility();
-        btn.hidden = true;
-        btn.disabled = false;
-        btn.textContent = '다음 단계';
-        return;
-    }
-
-    syncReviewNextStepDockVisibility();
-    btn.hidden = false;
-    btn.disabled = true;
-    btn.textContent = '다음 단계 (60초)';
+    dock.hidden = true;
     if (hintEl) {
-        hintEl.textContent = '최소 1분 이상 복습한 뒤 진행할 수 있습니다.';
-        hintEl.hidden = false;
+        hintEl.textContent = '';
+        hintEl.hidden = true;
     }
-
-    scheduleStageDelay(
-        'reviewToSurvey',
-        60000,
-        () => {
-            if (currentStage !== 'review') return;
-            btn.disabled = false;
-            btn.textContent = '다음 단계';
-            if (hintEl) {
-                hintEl.textContent = '';
-                hintEl.hidden = true;
-            }
-        },
-        (remainingSec) => {
-            if (currentStage !== 'review') return;
-            btn.textContent = `다음 단계 (${remainingSec}초)`;
-        }
-    );
 }
 
 const REQUIRED_RESPONSE_ALERT_MSG = '빈 부분을 모두 응답해 주세요.';
@@ -298,22 +309,6 @@ function isNonEmptyText(value) {
 }
 
 function validateReviewBeforeProceed() {
-    const condition = getExperimentCondition();
-
-    if (condition === 1) {
-        const notes = document.getElementById('relearning-notes');
-        const relearningMode = document.getElementById('relearning-mode');
-        const relearningVisible =
-            relearningMode &&
-            relearningMode.style.display !== 'none' &&
-            relearningMode.offsetParent !== null;
-        if (relearningVisible && notes && !isNonEmptyText(notes.value)) {
-            alertRequiredResponse();
-            notes.focus();
-            return false;
-        }
-    }
-
     return true;
 }
 
@@ -610,11 +605,10 @@ function mapConditionToCode() {
 
 const STAGE_TO_CANONICAL_PAGE = {
     'experiment-start': 'welcome',
-    introduction: 'instruction',
-    'review-instruction': 'instruction',
-    learning: 'study_page_1',
-    jol1: 'study_page_2',
-    review: 'review_page',
+    'pre-jol': 'instruction',
+    'post-jol': 'instruction',
+    'review-instruction': 'learning_instruction',
+    review: 'learning_self_restudy',
     survey: 'survey_mental_effort',
     'survey-instruction': 'survey_mental_effort',
     'math-preintro': 'distractor_page',
@@ -632,8 +626,16 @@ const STAGE_TO_CANONICAL_PAGE = {
 };
 
 function resolveCanonicalPageName(stageKey, partialPageName) {
-    if (partialPageName && STAGE_TO_CANONICAL_PAGE[partialPageName] === undefined) {
+    if (partialPageName) {
         const p = String(partialPageName);
+        const learningPages = new Set([
+            'learning_instruction',
+            'learning_self_restudy',
+            'learning_self_qg',
+            'learning_ai_restudy',
+            'learning_ai_qg',
+        ]);
+        if (learningPages.has(p)) return p;
         if (p.startsWith('final_test_q')) {
             const n = parseInt(p.replace('final_test_q', ''), 10);
             if (n >= 7) return 'final_test_transfer';
@@ -645,11 +647,11 @@ function resolveCanonicalPageName(stageKey, partialPageName) {
         }
     }
     const stage = stageKey || currentStage;
+    if (stage === 'review-instruction') {
+        return 'learning_instruction';
+    }
     if (stage === 'review') {
-        const c = getExperimentCondition();
-        if (c === 2) return 'review_qg_text';
-        if (c === 4) return 'review_qg_ai';
-        return 'review_page';
+        return resolveLearningPageNameByCondition();
     }
     return STAGE_TO_CANONICAL_PAGE[stage] || 'instruction';
 }
@@ -716,7 +718,13 @@ function buildSupabaseEventRow(partial) {
         generated_explanation_text: partial.generated_explanation_text ?? null,
         question_type_check_memory_fact: partial.question_type_check_memory_fact ?? null,
         question_type_check_understanding_application: partial.question_type_check_understanding_application ?? null,
-        metadata: partial.metadata != null ? partial.metadata : partial.extra != null ? { extra: partial.extra } : {},
+        metadata: withProtocolMetadata(
+            partial.metadata != null
+                ? partial.metadata
+                : partial.extra != null
+                  ? { extra: partial.extra }
+                  : {}
+        ),
     };
     return row;
 }
@@ -826,21 +834,30 @@ function saveChatLog(role, messageText, taskStage, meta) {
     collectedChatLogs.push(entry);
 
     const canonicalPage = resolveCanonicalPageName(taskStage || currentStage);
+    let chatItemId = resolvedMeta.item_id || null;
     if (role === 'user') {
+        sessionState.chatTurnCounter = (sessionState.chatTurnCounter || 0) + 1;
+        chatItemId = `chat_turn_${String(sessionState.chatTurnCounter).padStart(3, '0')}`;
+        sessionState.currentChatTurnItemId = chatItemId;
         postSupabaseEvent({
             event_type: 'chat_user',
             page_name: canonicalPage,
+            item_id: chatItemId,
             chatbot_user_message: entry.message_text,
             dwell_time_ms: entry.dwell_time_ms,
-            metadata: { message_order: entry.message_order, task_stage: entry.task_stage },
+            metadata: withProtocolMetadata({ message_order: entry.message_order, task_stage: entry.task_stage }),
         });
     } else {
+        if (!chatItemId) {
+            chatItemId = sessionState.currentChatTurnItemId || `chat_turn_${String(sessionState.chatTurnCounter || 1).padStart(3, '0')}`;
+        }
         postSupabaseEvent({
             event_type: 'chat_ai',
             page_name: canonicalPage,
+            item_id: chatItemId,
             chatbot_ai_reply: entry.message_text,
             dwell_time_ms: entry.dwell_time_ms,
-            metadata: { message_order: entry.message_order, task_stage: entry.task_stage },
+            metadata: withProtocolMetadata({ message_order: entry.message_order, task_stage: entry.task_stage }),
         });
     }
 
@@ -979,6 +996,8 @@ function resolveSurveyJolItemId(partial) {
     const block = String(partial.block_name || '').toLowerCase();
     const page = String(partial.page_name || '').toLowerCase();
 
+    if (block === 'pre_jol' || page === 'pre-jol' || page === 'pre_jol') return 'pre_jol_score';
+    if (block === 'post_jol' || page === 'post-jol' || page === 'post_jol') return 'post_jol_score';
     if (block === 'jol1' || page === 'jol1') return resolveJolItemId(1);
     if (block === 'jol2' || page === 'jol2') return resolveJolItemId(2);
     if (block === 'demographics' || page === 'demographics') return 'demographics_raw';
@@ -1105,6 +1124,18 @@ const SUMMARY_PAGE_KEYS = [
     'submit',
 ];
 
+function countQgCompleteIncomplete() {
+    const pairs = Array.isArray(experimentData.review?.pairs) ? experimentData.review.pairs : [];
+    let complete = 0;
+    let incomplete = 0;
+    for (const p of pairs) {
+        if (!p || !isNonEmptyText(p.question)) continue;
+        if (isQgPairComplete(p.question, p.answer, p.explanation)) complete += 1;
+        else incomplete += 1;
+    }
+    return { complete, incomplete };
+}
+
 function buildParticipantSummaryRow() {
     const startMs = experimentData.startTime ? new Date(experimentData.startTime).getTime() : null;
     const endMs = Date.now();
@@ -1112,6 +1143,7 @@ function buildParticipantSummaryRow() {
         participant_id: getParticipantIdSafe(),
         session_id: sessionState.sessionId,
         condition: mapConditionToCode(),
+        protocol_version: PROTOCOL_VERSION,
         experiment_start_time: experimentData.startTime || null,
         experiment_end_time: experimentSheetTimestamp(endMs),
         total_duration_ms: startMs != null ? Math.max(0, endMs - startMs) : null,
@@ -1126,6 +1158,21 @@ function buildParticipantSummaryRow() {
         summary[`${pageKey}_input_value`] = m.input_value != null ? m.input_value : null;
     }
 
+    const learningPage = resolveLearningPageNameByCondition();
+    const learningMetrics = pageMetricsState.byPage[learningPage] || {};
+    summary.learning_enter_time = learningMetrics.enter_time || null;
+    summary.learning_leave_time = learningMetrics.leave_time || null;
+    summary.learning_dwell_time_ms = learningMetrics.dwell_time_ms != null ? learningMetrics.dwell_time_ms : null;
+    summary.learning_click_count = learningMetrics.click_count != null ? learningMetrics.click_count : null;
+
+    summary.pre_jol_score = experimentData.preJol != null ? experimentData.preJol : null;
+    summary.post_jol_score = experimentData.postJol != null ? experimentData.postJol : null;
+    if (summary.pre_jol_score != null && summary.post_jol_score != null) {
+        summary.jol_change_score = summary.post_jol_score - summary.pre_jol_score;
+    } else {
+        summary.jol_change_score = null;
+    }
+
     const d = experimentData.distractor;
     const attempted = d?.totalCount ?? 0;
     const correct = d?.correctCount ?? 0;
@@ -1136,11 +1183,20 @@ function buildParticipantSummaryRow() {
     summary.distractor_incorrect_count = incorrect;
     summary.distractor_accuracy = attempted > 0 ? correct / attempted : null;
 
+    const qgCounts = countQgCompleteIncomplete();
     summary.question_generation_count = Array.isArray(experimentData.review?.pairs)
-        ? experimentData.review.pairs.length
+        ? experimentData.review.pairs.filter((p) => p && isNonEmptyText(p.question)).length
         : 0;
+    summary.qg_complete_count = qgCounts.complete;
+    summary.qg_incomplete_count = qgCounts.incomplete;
     summary.chat_user_message_count = collectedChatLogs.filter((l) => l.role === 'user').length;
     summary.chat_ai_message_count = collectedChatLogs.filter((l) => l.role === 'assistant').length;
+
+    const ftAnswers = experimentData.finalTest?.answers || {};
+    summary.final_test_response_count = Object.keys(ftAnswers).filter((k) => isNonEmptyText(ftAnswers[k])).length;
+    summary.final_fact_score = null;
+    summary.final_transfer_score = null;
+
     summary.experiment_snapshot = experimentData;
     return summary;
 }
@@ -1271,7 +1327,7 @@ function assignCondition() {
 function syncLearningTimerFloatVisibility(stageKey) {
     const el = document.getElementById('learning-timer-float-root');
     if (!el) return;
-    const show = stageKey === 'learning';
+    const show = stageKey === 'review';
     if (show) {
         el.hidden = false;
         el.setAttribute('aria-hidden', 'false');
@@ -1319,6 +1375,12 @@ function showStage(stage) {
                 setupAiLiteracySurvey();
             }, 100);
         } else if (stage === 'completion') {
+            saveExperimentEvent({
+                event_type: 'completion',
+                page_name: 'submit',
+                block_name: 'completion',
+                metadata: withProtocolMetadata({}),
+            });
             submitAllDataToBackend({ silent: true });
             const btn = document.getElementById('download-btn');
             if (btn) {
@@ -1536,8 +1598,6 @@ function setupReviewStage() {
     }
     
     experimentData.review.startTime = experimentSheetTimestamp();
-
-    // 질문생성 조건(2, 4)에서만 기억(사실)/응용(추론) 유형 선택 표시 (1·3·개발자 미지정은 숨김)
     const questionTypeChoices = document.querySelector('.question-type-choices');
     if (questionTypeChoices) {
         if (condition === 1 || condition === 3) {
@@ -1547,14 +1607,17 @@ function setupReviewStage() {
         }
     }
 
+    // 복습 우측 하단 '다음 단계' 제거 — 학습 시간 종료 시 자동 진행
     updateReviewStageBar();
 
-    // 복습 우측 하단 '다음 단계': 조건 1·3만 1분 후 활성화 (조건 2·4는 '다음 문제' 아래 '다음 단계' 사용)
-    const reviewToSurveyBtn = document.getElementById('review-to-survey-btn');
-    if (reviewToSurveyBtn) reviewToSurveyBtn.hidden = true;
-    setupReviewToSurveyDelay();
-
     setupQuestionTypeExclusiveCheckboxes();
+
+    const reviewHeader = document.querySelector('.review-screen-header');
+    if (reviewHeader) reviewHeader.style.display = '';
+
+    if (!timers['learning-session'] && !sessionState.learningSessionTimerCompleted) {
+        startLearningSessionTimer();
+    }
 }
 
 // 질문생성: 기억(사실) / 응용(추론) 중 하나만 선택
@@ -1619,13 +1682,6 @@ function showCurrentPair() {
         pairInfo.textContent = `문제 ${currentPairIndex + 1}`;
     }
     
-    // 조건 2·4: 우측 하단 독 대신 '다음 문제' 아래 '다음 단계' 버튼 사용
-    const condition = getExperimentCondition();
-    const reviewToSurveyBtn = document.getElementById('review-to-survey-btn');
-    if (reviewToSurveyBtn && (condition === 2 || condition === 4)) {
-        reviewToSurveyBtn.hidden = true;
-    }
-
     updateQuestionPairActionButton();
 
     // 현재 쌍 데이터가 있으면 표시, 없으면 빈 필드
@@ -1656,103 +1712,122 @@ function showCurrentPair() {
 
 function updateQuestionPairActionButton() {
     const pairNextBtn = document.getElementById('pair-next-btn');
-    const pairSubmitBtn = document.getElementById('pair-submit-btn');
-    if (!pairNextBtn) return;
-
-    const condition = getExperimentCondition();
-    const currentPairIndex = experimentData.review.currentPairIndex || 0;
-    if (condition !== 2 && condition !== 4) return;
-
-    pairNextBtn.style.display = 'inline-block';
-    pairNextBtn.textContent = '다음 문제';
-
-    if (pairSubmitBtn) {
-        const canSubmit = currentPairIndex >= 5;
-        pairSubmitBtn.hidden = !canSubmit;
-        pairSubmitBtn.style.display = canSubmit ? 'inline-block' : 'none';
-        pairSubmitBtn.textContent = '다음 단계';
+    const pairAddBtn = document.getElementById('pair-add-btn');
+    if (pairNextBtn) {
+        pairNextBtn.style.display = 'inline-block';
+        pairNextBtn.textContent = '다음 문제';
+    }
+    if (pairAddBtn) {
+        pairAddBtn.style.display = 'inline-block';
     }
 }
 
-function validateAndSaveCurrentPair() {
+function readCurrentPairFields() {
     const currentQuestion = document.getElementById('current-question');
     const currentAnswer = document.getElementById('current-answer');
     const currentExplanation = document.getElementById('current-explanation');
-
-    if (!currentQuestion || !currentAnswer || !currentExplanation) return false;
-
-    const question = currentQuestion.value.trim();
-    const answer = currentAnswer.value.trim();
-    const explanation = currentExplanation.value.trim();
-
     const factCb = document.getElementById('question-type-fact');
     const understandCb = document.getElementById('question-type-understand');
-    const typeFact = !!(factCb && factCb.checked);
-    const typeUnderstand = !!(understandCb && understandCb.checked);
 
-    if (!question || !answer || !explanation || (!typeFact && !typeUnderstand)) {
-        alertRequiredResponse();
-        if (!question && currentQuestion) currentQuestion.focus();
-        else if (!answer && currentAnswer) currentAnswer.focus();
-        else if (!explanation && currentExplanation) currentExplanation.focus();
-        return false;
-    }
+    return {
+        question: currentQuestion ? currentQuestion.value.trim() : '',
+        answer: currentAnswer ? currentAnswer.value.trim() : '',
+        explanation: currentExplanation ? currentExplanation.value.trim() : '',
+        typeFact: !!(factCb && factCb.checked),
+        typeUnderstand: !!(understandCb && understandCb.checked),
+        elements: { currentQuestion, currentAnswer, currentExplanation, factCb, understandCb },
+    };
+}
 
-    const currentPairIndex = experimentData.review.currentPairIndex;
+function persistCurrentPairToMemory() {
+    const fields = readCurrentPairFields();
+    if (!isNonEmptyText(fields.question)) return null;
+
+    const currentPairIndex = experimentData.review.currentPairIndex || 0;
     const pairData = {
         number: currentPairIndex + 1,
-        question,
-        answer,
-        explanation,
-        typeFact,
-        typeUnderstand,
+        question: fields.question,
+        answer: fields.answer,
+        explanation: fields.explanation,
+        typeFact: fields.typeFact,
+        typeUnderstand: fields.typeUnderstand,
+        isComplete: isQgPairComplete(fields.question, fields.answer, fields.explanation),
     };
 
-    if (experimentData.review.pairs[currentPairIndex]) {
-        experimentData.review.pairs[currentPairIndex] = pairData;
-    } else {
-        experimentData.review.pairs.push(pairData);
-    }
+    if (!experimentData.review.pairs) experimentData.review.pairs = [];
+    experimentData.review.pairs[currentPairIndex] = pairData;
+    return pairData;
+}
 
-    const pairStart = sessionState.reviewPairStartedAt;
+function postQuestionGenerationEvent(pairIndex, pairData, pairStart) {
+    const itemId = formatQgItemId(pairIndex);
+    if (sessionState.savedQgItemIds[itemId]) return;
+
     const nowMs = Date.now();
-    const canonicalQgPage = resolveCanonicalPageName('review');
+    const canonicalQgPage = resolveLearningPageNameByCondition();
     saveExperimentEvent({
         page_name: canonicalQgPage,
         block_name: 'question_generation_submit',
         event_type: 'question_generation_submit',
-        generated_question_text: question,
-        generated_answer_text: answer,
-        generated_explanation_text: explanation,
-        question_type_check_memory_fact: typeFact,
-        question_type_check_understanding_application: typeUnderstand,
+        item_id: itemId,
+        generated_question_text: pairData.question,
+        generated_answer_text: pairData.answer || null,
+        generated_explanation_text: pairData.explanation || null,
+        question_type_check_memory_fact: pairData.typeFact,
+        question_type_check_understanding_application: pairData.typeUnderstand,
         response_value: JSON.stringify({
-            question,
-            answer,
-            explanationSnippet: explanation.slice(0, 500),
-            typeFact,
-            typeUnderstand,
+            question: pairData.question,
+            answer: pairData.answer,
+            explanationSnippet: (pairData.explanation || '').slice(0, 500),
+            typeFact: pairData.typeFact,
+            typeUnderstand: pairData.typeUnderstand,
         }),
         time_spent: pairStart != null ? Math.round(nowMs - pairStart) : null,
         start_time: pairStart != null ? experimentSheetTimestamp(pairStart) : null,
         end_time: experimentSheetTimestamp(nowMs),
-        is_correct: null,
+        metadata: withProtocolMetadata({ qg_is_complete: !!pairData.isComplete }),
     });
+    sessionState.savedQgItemIds[itemId] = true;
+}
 
+function saveAllQuestionGenerationPairs(options) {
+    persistCurrentPairToMemory();
+    const pairs = experimentData.review.pairs || [];
+    const pairStart = sessionState.reviewPairStartedAt;
+    pairs.forEach((pairData, index) => {
+        if (!pairData || !isNonEmptyText(pairData.question)) return;
+        postQuestionGenerationEvent(index, pairData, pairStart);
+    });
+    if (options && options.fromTimer) {
+        /* timer flush — no UI block */
+    }
+}
+
+function validateAndSaveCurrentPair() {
+    const fields = readCurrentPairFields();
+    if (!isNonEmptyText(fields.question)) {
+        return true;
+    }
+
+    const pairData = persistCurrentPairToMemory();
+    if (!pairData) return true;
+
+    const currentPairIndex = experimentData.review.currentPairIndex || 0;
+    postQuestionGenerationEvent(currentPairIndex, pairData, sessionState.reviewPairStartedAt);
     return true;
 }
 
-// 다음 쌍으로 이동
+// 다음 쌍으로 이동 (질문 텍스트 없어도 이동 가능)
 function moveToNextPair() {
-    if (!validateAndSaveCurrentPair()) return;
-
-    experimentData.review.currentPairIndex++;
+    validateAndSaveCurrentPair();
+    experimentData.review.currentPairIndex = (experimentData.review.currentPairIndex || 0) + 1;
     showCurrentPair();
 }
 
-function submitQuestionGenerationReview() {
-    if (!validateAndSaveCurrentPair()) return;
-    showStage('survey-instruction');
+function addQuestionPair() {
+    validateAndSaveCurrentPair();
+    experimentData.review.currentPairIndex = (experimentData.review.currentPairIndex || 0) + 1;
+    showCurrentPair();
 }
 
 // 질문 항목 추가
@@ -2733,21 +2808,7 @@ function stopTimer(timerId) {
     }
 }
 
-// 지문 학습 단계
-function startLearningStage() {
-    sessionState.learningTimerCompleted = false;
-    showStage('learning');
-    const timerDisplay = document.getElementById('learning-timer');
-    const timerFloatDisplay = document.getElementById('learning-timer-float-display');
-
-    experimentData.learning.startTime = experimentSheetTimestamp();
-
-    startTimer('learning', 360, [timerDisplay, timerFloatDisplay].filter(Boolean), () => {
-        completeLearningStage();
-    });
-}
-
-// 조건 2 복습 안내 두 번째 페이지 내용 (기억(사실) 문제 예시)
+// 조건 2 학습 안내 — 문제 예시 (기억)
 function setReviewInstructionCondition2Page2() {
     const content = document.getElementById('review-instruction-content');
     if (!content) return;
@@ -2762,7 +2823,7 @@ function setReviewInstructionCondition2Page2() {
     `;
 }
 
-// 조건 2 복습 안내 세 번째 페이지 내용 (응용(추론) 문제 예시)
+// 조건 2 학습 안내 — 문제 예시 (응용)
 function setReviewInstructionCondition2Page3() {
     const content = document.getElementById('review-instruction-content');
     if (!content) return;
@@ -2776,52 +2837,120 @@ function setReviewInstructionCondition2Page3() {
     `;
 }
 
-// 조건 2 복습 안내 네 번째 페이지 내용
+// 조건 2·4 학습 안내 — 마지막 안내
 function setReviewInstructionCondition2Page4() {
     const content = document.getElementById('review-instruction-content');
     if (!content) return;
     content.innerHTML = `
-        <p>시간 제한은 없으며, 만드는 문제의 개수도 제한이 없습니다.</p>
-        <p style="margin-top: 1em;">시험을 볼 준비가 되었다고 판단했을 때 '다음' 버튼을 눌러 다음 단계로 이동해주세요.</p>
-        <p style="margin-top: 1em;">준비되었으면 '다음' 버튼을 눌러주세요.</p>
+        <p>학습 세션 제한시간은 <strong>10분</strong>입니다.</p>
+        <p style="margin-top: 1em;">10분 안에 가능한 만큼 문제를 만드세요. (권장: 최소 4문제)</p>
+        <p style="margin-top: 1em;">시간이 종료되면 자동으로 다음 단계로 이동합니다.</p>
+        <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 학습 세션을 시작해 주세요.</strong></p>
     `;
 }
 
-// 조건 4 복습 안내 두 번째 페이지 내용 (AI 챗봇 안내)
+// 조건 4 학습 안내 — AI 챗봇 안내
 function setReviewInstructionCondition4Page2() {
     const content = document.getElementById('review-instruction-content');
     if (!content) return;
     content.innerHTML = `
-        <p>단, 이번에는 'AI 챗봇'을 사용하며 지문을 학습할 수 있습니다.</p>
-        <p>AI 챗봇은 학습 자료를 중심으로 하되, ChatGPT처럼 자유롭게 질문하고 탐색할 수 있습니다.</p>
-        <p>다만, 실험 페이지 내부가 아닌 외부의 다른 AI를 사용하는 것은 삼가주세요.</p>
+        <p>학습 세션에서 지문을 읽으며 학습합니다.</p>
+        <p>또한 <strong>AI 챗봇</strong>을 사용해 지문 내용에 대해 질문하고 탐색할 수 있습니다.</p>
+        <p>AI 챗봇은 학습 자료를 중심으로 하되, ChatGPT처럼 자유롭게 질문할 수 있습니다.</p>
+        <p>실험 페이지 외부의 다른 AI 사용은 삼가 주세요.</p>
+        <p style="margin-top: 1em;">학습 세션 제한시간은 <strong>10분</strong>이며, 시간 종료 시 자동으로 다음 단계로 이동합니다.</p>
+        <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 학습 세션을 시작해 주세요.</strong></p>
     `;
 }
 
-// 조건 3 복습 안내 두 번째 페이지 내용
+// 조건 3 학습 안내 — AI 챗봇 (두 번째 페이지)
 function setReviewInstructionCondition3Page2() {
     const content = document.getElementById('review-instruction-content');
     if (!content) return;
     content.innerHTML = `
-        <p>복습 화면에서 지문을 다시 학습합니다.</p>
-        <p>시간 제한은 없으나, 복습 화면에서 최소 1분 이상 학습한 뒤 '다음 단계' 버튼이 활성화됩니다.</p>
-        <p>시험을 볼 준비가 되었다고 판단했을 때 '다음 단계' 버튼을 눌러 다음 단계로 이동해주세요.</p>
-        <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 복습을 시작해 주세요.</strong></p>
+        <p>학습 세션에서 지문을 읽으며 학습합니다.</p>
+        <p>또한 <strong>AI 챗봇</strong>을 사용해 지문 내용에 대해 질문하고 탐색할 수 있습니다.</p>
+        <p style="margin-top: 1em;">학습 세션 제한시간은 <strong>10분</strong>이며, 시간 종료 시 자동으로 다음 단계로 이동합니다.</p>
+        <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 학습 세션을 시작해 주세요.</strong></p>
     `;
 }
 
-// 복습 단계
+// 학습 안내 내용 설정 (조건에 따라)
+function setupReviewInstruction() {
+    const condition = getExperimentCondition();
+    if (condition != null) experimentData.condition = condition;
+    const content = document.getElementById('review-instruction-content');
+    if (!content) return;
+    if (condition === 2 || condition === 3 || condition === 4) reviewInstructionStep = 1;
+    else reviewInstructionStep = 0;
+
+    if (condition === 1) {
+        content.innerHTML = `
+            <p>이제 학습 세션을 시작합니다.</p>
+            <p>화면에 제시된 지문을 읽으며 학습해 주세요.</p>
+            <p style="margin-top: 1em;">학습 세션 제한시간은 <strong>10분</strong>입니다. 화면 상단에서 남은 시간을 확인할 수 있습니다.</p>
+            <p>시간이 종료되면 자동으로 다음 단계로 이동합니다.</p>
+            <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 학습 세션을 시작해 주세요.</strong></p>
+        `;
+    } else if (condition === 2) {
+        content.innerHTML = `
+            <p>이제 학습 세션을 시작합니다.</p>
+            <p>지문을 읽으며, 최종시험에 나올 만한 <strong>예상 문제</strong>를 직접 만들어 보세요.</p>
+            <p style="margin-top: 1em;">각 문제에는 다음을 작성할 수 있습니다:</p>
+            <ol style="margin: 0.5em 0 0 1.25em; line-height: 1.6;">
+                <li>질문</li>
+                <li>답 (간단하게 핵심만)</li>
+                <li>해설 (지문을 바탕으로 답의 근거 설명)</li>
+            </ol>
+            <p style="margin-top: 1em;">문제 유형은 <strong>기억(사실)</strong> 또는 <strong>응용(추론)</strong> 중 하나를 선택하세요.</p>
+            <p>제한시간 <strong>10분</strong> 안에 가능한 만큼 문제를 만드세요. (권장: 최소 4문제)</p>
+        `;
+    } else if (condition === 3) {
+        content.innerHTML = `
+            <p>이제 학습 세션을 시작합니다.</p>
+            <p>지문을 읽으며 학습하고, <strong>AI 챗봇</strong>을 통해 궁금한 점을 질문할 수 있습니다.</p>
+            <p style="margin-top: 1em;">AI 챗봇은 학습 자료를 중심으로 답변합니다. 실험 페이지 외부 AI 사용은 삼가 주세요.</p>
+            <p>학습 세션 제한시간은 <strong>10분</strong>입니다.</p>
+        `;
+    } else if (condition === 4) {
+        content.innerHTML = `
+            <p>이제 학습 세션을 시작합니다.</p>
+            <p>지문을 읽고, <strong>AI 챗봇</strong>으로 궁금한 점을 질문하며, <strong>예상 시험 문제</strong>도 만들어 보세요.</p>
+            <p style="margin-top: 1em;">각 문제에는 질문, 답, 해설을 작성할 수 있으며, 유형은 기억(사실) 또는 응용(추론) 중 하나를 선택합니다.</p>
+            <p>제한시간 <strong>10분</strong> 안에 가능한 만큼 문제를 만드세요. (권장: 최소 4문제)</p>
+        `;
+    }
+}
+
+// 학습 안내 단계로 이동
 function startReviewStage() {
     if (experimentData.condition) {
         setupReviewInstruction();
         showStage('review-instruction');
         resetReviewInstructionNextButton();
+        saveExperimentEvent({
+            page_name: 'learning_instruction',
+            block_name: 'learning_instruction_enter',
+            event_type: 'learning_instruction_enter',
+            metadata: withProtocolMetadata({}),
+        });
     } else {
-        // 설계자 모드에서 조건이 없을 때는 바로 복습 화면으로
         showStage('review');
         setupReviewStage();
     }
-    // 복습 타이머 제거 - 시간 제한 없음
+}
+
+function beginLearningSessionFromInstruction() {
+    stopTimer('learning-session');
+    sessionState.learningSessionTimerCompleted = false;
+    sessionState.learningSessionEnterAt = null;
+    sessionState.savedQgItemIds = {};
+    experimentData.review.startTime = null;
+    experimentData.review.endTime = null;
+    experimentData.review.pairs = [];
+    experimentData.review.currentPairIndex = 0;
+    reviewInstructionStep = 0;
+    showStage('review');
 }
 
 // 방해과제 문제 리스트
@@ -3417,21 +3546,17 @@ function developerModeGoToStage(stage) {
     
     if (stage === 'experiment-start') {
         showStage('experiment-start');
-    } else if (stage === 'jol1') {
-        showStage('jol1');
-    } else if (stage === 'introduction') {
-        showStage('introduction');
-    } else if (stage === 'learning') {
-        startLearningStage();
+    } else if (stage === 'pre-jol') {
+        showStage('pre-jol');
+    } else if (stage === 'post-jol') {
+        showStage('post-jol');
     } else if (stage === 'review-instruction') {
         if (!getExperimentCondition()) setExperimentCondition(designerCondition || 1);
         setupReviewInstruction();
         showStage('review-instruction');
     } else if (stage === 'review') {
-        if (!getExperimentCondition()) setExperimentCondition(designerCondition || 2);
-        experimentData.review.questionStage = 'question';
-        showStage('review');
-        setupReviewStage();
+        if (!getExperimentCondition()) setExperimentCondition(designerCondition || 1);
+        beginLearningSessionFromInstruction();
     } else if (stage === 'survey-instruction') {
         showStage('survey-instruction');
     } else if (stage === 'survey') {
@@ -3481,10 +3606,10 @@ function syncDevPageSelect() {
 function updateDesignerInfo() {
     const currentCondition = getExperimentCondition() || normalizeCondition(designerCondition);
     const conditionNames = {
-        1: '조건1 - 재학습-self',
-        2: '조건2 - QG-self',
-        3: '조건3 - 재학습-AI',
-        4: '조건4 - QG-AI'
+        1: '조건 1',
+        2: '조건 2',
+        3: '조건 3',
+        4: '조건 4'
     };
     document.getElementById('current-condition').textContent = 
         currentCondition ? conditionNames[currentCondition] : '-';
@@ -3498,11 +3623,10 @@ function updateActiveNavButton() {
     
     const stageToBtnId = {
         'experiment-start': 'nav-experiment-start',
-        'introduction': 'nav-introduction',
-        'learning': 'nav-learning',
-        'jol1': 'nav-jol1',
+        'pre-jol': 'nav-pre-jol',
         'review-instruction': 'nav-review-instruction',
-        'review': 'nav-review-question',
+        'review': 'nav-review',
+        'post-jol': 'nav-post-jol',
         'survey-instruction': 'nav-survey',
         'survey': 'nav-survey',
         'distractor-instruction': 'nav-distractor-instruction',
@@ -3519,11 +3643,6 @@ function updateActiveNavButton() {
     };
     
     let activeId = stageToBtnId[currentStage];
-    if (currentStage === 'review' && experimentData.review && experimentData.review.questionStage === 'answer') {
-        activeId = 'nav-review-answer';
-    } else if (currentStage === 'review') {
-        activeId = 'nav-review-question';
-    }
     const activeBtn = activeId ? document.getElementById(activeId) : null;
     if (activeBtn) {
         activeBtn.classList.add('active');
@@ -3556,10 +3675,10 @@ function applyDesignerCondition() {
 function setupDesignerNavigation() {
     const navButtons = {
         'nav-experiment-start': 'experiment-start',
-        'nav-introduction': 'introduction',
-        'nav-learning': 'learning',
-        'nav-jol1': 'jol1',
+        'nav-pre-jol': 'pre-jol',
         'nav-review-instruction': 'review-instruction',
+        'nav-review': 'review',
+        'nav-post-jol': 'post-jol',
         'nav-survey': 'survey',
         'nav-distractor-instruction': 'distractor-instruction',
         'nav-distractor': 'distractor',
@@ -3608,123 +3727,12 @@ function setupDesignerNavigation() {
             toggleDesignerMode();
         });
     }
-    
-    // 복습: 질문 만들기 버튼
-    const navReviewQuestion = document.getElementById('nav-review-question');
-    if (navReviewQuestion) {
-        navReviewQuestion.addEventListener('click', function() {
-            if (designerMode) {
-                Object.keys(timers).forEach(key => stopTimer(key));
-                if (!getExperimentCondition()) setExperimentCondition(designerCondition || 2);
-                experimentData.review.questionStage = 'question';
-                showStage('review');
-                setupReviewStage();
-                updateActiveNavButton();
-                updateDesignerInfo();
-                syncDevPageSelect();
-            }
-        });
-    }
-    
-    // 복습: 답 써보기 버튼
-    const navReviewAnswer = document.getElementById('nav-review-answer');
-    if (navReviewAnswer) {
-        navReviewAnswer.addEventListener('click', function() {
-            if (designerMode) {
-                Object.keys(timers).forEach(key => stopTimer(key));
-                if (!getExperimentCondition()) setExperimentCondition(designerCondition || 2);
-                const questionInputs = document.querySelectorAll('#questions-container .question-input');
-                const questions = [];
-                questionInputs.forEach((input, index) => {
-                    const questionText = input.value.trim();
-                    if (questionText) {
-                        questions.push({ number: index + 1, question: questionText });
-                    }
-                });
-                if (questions.length === 0) {
-                    alert('먼저 질문 만들기 단계에서 질문을 입력해주세요.');
-                    return;
-                }
-                experimentData.review.questions = questions;
-                experimentData.review.questionStage = 'answer';
-                showStage('review');
-                setupReviewStage();
-                switchToAnswerWriting();
-                updateActiveNavButton();
-                updateDesignerInfo();
-                syncDevPageSelect();
-            }
-        });
-    }
 }
 
-// 복습 안내 내용 설정 (조건에 따라)
-function setupReviewInstruction() {
-    const condition = getExperimentCondition();
-    if (condition != null) experimentData.condition = condition;
-    const content = document.getElementById('review-instruction-content');
-    if (!content) return;
-    // 조건 2, 3, 4는 여러 페이지 구성이므로 진입 시 항상 1페이지부터
-    if (condition === 2 || condition === 3 || condition === 4) reviewInstructionStep = 1;
-    else reviewInstructionStep = 0;
-    
-    if (condition === 1) {
-        // 조건 1: 지문 재학습
-        content.innerHTML = `
-            <p>첫 번째 학습을 마쳤습니다.</p>
-            <p>지금부터는 앞에서 공부했던 지문을 동일한 방식으로 다시 학습합니다.</p>
-            <p style="margin-top: 1em;">시간 제한은 없으나, 복습 화면에서 최소 1분 이상 학습한 뒤 '다음 단계' 버튼이 활성화됩니다.</p>
-            <p>시험을 볼 준비가 되었다고 판단했을 때 '다음 단계' 버튼을 눌러 다음 단계로 이동해주세요.</p>
-            <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 복습을 시작해 주세요.</strong></p>
-        `;
-    } else if (condition === 2) {
-        // 조건 2: 지문+질문생성 (첫 페이지)
-        content.innerHTML = `
-            <p>첫 번째 학습을 마쳤습니다.</p>
-            <p>지금부터는 앞에서 공부했던 지문을 다시 학습합니다.</p>
-            <p>이 때, 다가올 최종 시험에 나올 만한 예상 시험 문제를 만들면서 공부하세요.</p>
-            <p style="margin-top: 1em;">문제는 다음과 같이 구성해야 합니다:</p>
-            <ul style="margin: 0.5em 0 0 1.25em; line-height: 1.6;">
-                <li>지문의 내용을 그대로 확인하는 기억(사실) 문제 3문제 이상</li>
-                <li>지문에 나온 개념을 활용하여 추론해야 하는 응용(추론) 문제 3문제 이상</li>
-            </ul>
-            <p style="margin-top: 1em;">각 문제에 대해 반드시 다음을 함께 작성하세요:</p>
-            <ol style="margin: 0.5em 0 0 1.25em; line-height: 1.6;">
-                <li>문제</li>
-                <li>답 (간단하게 핵심만)</li>
-                <li>해설 (답의 근거를 지문을 바탕으로 충분히 설명)</li>
-            </ol>
-            <p style="margin-top: 1em;">문제는 객관식 또는 주관식 등 다양한 형태로 자유롭게 만들 수 있습니다.</p>
-        `;
-    } else if (condition === 3) {
-        // 조건 3: AI 재학습 (첫 페이지 – 다음 버튼 바로 활성화)
-        content.innerHTML = `
-            <p>첫 번째 학습을 마쳤습니다.</p>
-            <p>지금부터는 앞에서 공부했던 지문을 다시 학습합니다.</p>
-            <p style="margin-top: 1em;">단, 이번에는 'AI 챗봇'을 사용하며 지문을 학습할 수 있습니다.</p>
-            <p>AI 챗봇은 학습 자료를 중심으로 하되, ChatGPT처럼 자유롭게 질문하고 탐색할 수 있습니다.</p>
-            <p>다만, 실험 페이지 내부가 아닌 외부의 다른 AI를 사용하는 것은 삼가주세요.</p>
-        `;
-    } else if (condition === 4) {
-        // 조건 4: AI+질문생성 (첫 페이지 – 조건 2와 동일한 지시문)
-        content.innerHTML = `
-            <p>첫 번째 학습을 마쳤습니다.</p>
-            <p>지금부터는 앞에서 공부했던 지문을 다시 학습합니다.</p>
-            <p>이 때, 다가올 최종 시험에 나올 만한 예상 시험 문제를 만들면서 공부하세요.</p>
-            <p style="margin-top: 1em;">문제는 다음과 같이 구성해야 합니다:</p>
-            <ul style="margin: 0.5em 0 0 1.25em; line-height: 1.6;">
-                <li>지문의 내용을 그대로 확인하는 기억(사실) 문제 3문제 이상</li>
-                <li>지문에 나온 개념을 활용하여 추론해야 하는 응용(추론) 문제 3문제 이상</li>
-            </ul>
-            <p style="margin-top: 1em;">각 문제에 대해 반드시 다음을 함께 작성하세요:</p>
-            <ol style="margin: 0.5em 0 0 1.25em; line-height: 1.6;">
-                <li>문제</li>
-                <li>답 (간단하게 핵심만)</li>
-                <li>해설 (답의 근거를 지문을 바탕으로 충분히 설명)</li>
-            </ol>
-            <p style="margin-top: 1em;">문제는 객관식 또는 주관식 등 다양한 형태로 자유롭게 만들 수 있습니다.</p>
-        `;
-    }
+// (구) 6분 첫 학습 — 새 절차에서 미사용
+function startLearningStage() {
+    showStage('review');
+    setupReviewStage();
 }
 
 function closeExperimentPage() {
@@ -3763,7 +3771,13 @@ function onExperimentStartClick() {
     // 참가자 시작 시 챗봇 세션을 새로 부여하고, 실험 중에는 같은 세션으로 맥락 유지
     setChatApiSessionForCurrentParticipant(participantId);
     assignCondition();
-    showStage('introduction');
+    saveExperimentEvent({
+        page_name: 'welcome',
+        block_name: 'participant_start',
+        event_type: 'participant_start',
+        metadata: withProtocolMetadata({ participant_id: participantId }),
+    });
+    showStage('pre-jol');
 }
 
 // 이벤트 리스너
@@ -3799,57 +3813,100 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
     
-    // Introduction 다음 버튼
-    document.getElementById('introduction-next-btn').addEventListener('click', () => {
-        startLearningStage();
-    });
-    
-    // JOL1 다음 버튼
-    const jol1NextBtn = document.getElementById('jol1-next-btn');
-    const jol1Input = document.getElementById('jol1-input');
-    if (jol1NextBtn && jol1Input) {
-        jol1NextBtn.addEventListener('click', () => {
-            const val = jol1Input.value.trim();
+    function bindJolNumericInput(inputEl) {
+        if (!inputEl) return;
+        inputEl.addEventListener('input', (e) => {
+            e.target.value = e.target.value.replace(/[^0-9]/g, '');
+            const n = parseInt(e.target.value, 10);
+            if (!isNaN(n) && n > 100) e.target.value = '100';
+        });
+    }
+
+    // pre-JOL 다음 버튼
+    const preJolNextBtn = document.getElementById('pre-jol-next-btn');
+    const preJolInput = document.getElementById('pre-jol-input');
+    if (preJolNextBtn && preJolInput) {
+        preJolNextBtn.addEventListener('click', () => {
+            const val = preJolInput.value.trim();
             if (val === '') {
                 alertRequiredResponse();
-                jol1Input.focus();
+                preJolInput.focus();
                 return;
             }
             const num = parseInt(val, 10);
             if (isNaN(num) || num < 0 || num > 100) {
                 alertRequiredResponse();
-                jol1Input.focus();
+                preJolInput.focus();
                 return;
             }
-            experimentData.jol1 = num;
+            experimentData.preJol = num;
             const jStart = sessionState.lastStageEnterAt;
             const jNow = Date.now();
             saveExperimentEvent({
-                page_name: 'jol1',
-                block_name: 'jol1',
-                item_id: resolveJolItemId(1),
+                page_name: 'pre-jol',
+                block_name: 'pre_jol',
+                event_type: 'pre_jol',
+                item_id: 'pre_jol_score',
+                input_value: String(num),
                 response_value: String(num),
                 time_spent: jStart != null ? Math.round(jNow - jStart) : null,
                 start_time: jStart != null ? experimentSheetTimestamp(jStart) : null,
                 end_time: experimentSheetTimestamp(jNow),
-                is_correct: null,
             });
             startReviewStage();
         });
-        jol1Input.addEventListener('input', (e) => {
-            e.target.value = e.target.value.replace(/[^0-9]/g, '');
-            const n = parseInt(e.target.value, 10);
-            if (!isNaN(n) && n > 100) e.target.value = '100';
-        });
-        jol1Input.addEventListener('keypress', (e) => {
+        bindJolNumericInput(preJolInput);
+        preJolInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
-                jol1NextBtn.click();
+                preJolNextBtn.click();
+            }
+        });
+    }
+
+    // post-JOL 다음 버튼
+    const postJolNextBtn = document.getElementById('post-jol-next-btn');
+    const postJolInput = document.getElementById('post-jol-input');
+    if (postJolNextBtn && postJolInput) {
+        postJolNextBtn.addEventListener('click', () => {
+            const val = postJolInput.value.trim();
+            if (val === '') {
+                alertRequiredResponse();
+                postJolInput.focus();
+                return;
+            }
+            const num = parseInt(val, 10);
+            if (isNaN(num) || num < 0 || num > 100) {
+                alertRequiredResponse();
+                postJolInput.focus();
+                return;
+            }
+            experimentData.postJol = num;
+            const jStart = sessionState.lastStageEnterAt;
+            const jNow = Date.now();
+            saveExperimentEvent({
+                page_name: 'post-jol',
+                block_name: 'post_jol',
+                event_type: 'post_jol',
+                item_id: 'post_jol_score',
+                input_value: String(num),
+                response_value: String(num),
+                time_spent: jStart != null ? Math.round(jNow - jStart) : null,
+                start_time: jStart != null ? experimentSheetTimestamp(jStart) : null,
+                end_time: experimentSheetTimestamp(jNow),
+            });
+            showStage('survey-instruction');
+        });
+        bindJolNumericInput(postJolInput);
+        postJolInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                postJolNextBtn.click();
             }
         });
     }
     
-    // 복습 안내 다음 버튼
+    // 학습 안내 다음 버튼
     document.getElementById('review-instruction-next-btn').addEventListener('click', () => {
         const condition = getExperimentCondition();
         const reviewNextBtn = document.getElementById('review-instruction-next-btn');
@@ -3871,9 +3928,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         if (condition === 2 && reviewInstructionStep === 4) {
-            reviewInstructionStep = 0;
-            showStage('review');
-            setupReviewStage();
+            beginLearningSessionFromInstruction();
             return;
         }
         // 조건 3(AI 재학습): 첫 페이지에서 다음 → 두 번째 페이지로(바로 다음 가능), 두 번째 페이지에서 다음 → 복습 화면으로
@@ -3884,9 +3939,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         if (condition === 3 && reviewInstructionStep === 2) {
-            reviewInstructionStep = 0;
-            showStage('review');
-            setupReviewStage();
+            beginLearningSessionFromInstruction();
             return;
         }
         // 조건 4(AI+질문생성): 1페이지 → 2페이지(객관식 예시) → 3페이지(주관식 예시) → 4페이지(AI 챗봇 안내) → 5페이지(시간 제한 없음) → 복습 화면
@@ -3911,25 +3964,12 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         if (condition === 4 && reviewInstructionStep === 5) {
-            reviewInstructionStep = 0;
-            showStage('review');
-            setupReviewStage();
+            beginLearningSessionFromInstruction();
             return;
         }
-        reviewInstructionStep = 0;
-        showStage('review');
-        setupReviewStage();
+        beginLearningSessionFromInstruction();
     });
     
-    // 복습 화면에서 설문 안내로 가는 '다음' 버튼 (1분 후 표시됨)
-    const reviewToSurveyBtn = document.getElementById('review-to-survey-btn');
-    if (reviewToSurveyBtn) {
-        reviewToSurveyBtn.addEventListener('click', () => {
-            if (!validateReviewBeforeProceed()) return;
-            showStage('survey-instruction');
-        });
-    }
-
     // 설문 안내에서 설문으로 가는 '다음' 버튼
     const surveyInstructionNextBtn = document.getElementById('survey-instruction-next-btn');
     if (surveyInstructionNextBtn) {
@@ -4176,15 +4216,15 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 질문+답+해설 쌍 다음 / 다음 단계 버튼
     const pairNextBtn = document.getElementById('pair-next-btn');
-    const pairSubmitBtn = document.getElementById('pair-submit-btn');
+    const pairAddBtn = document.getElementById('pair-add-btn');
     if (pairNextBtn) {
         pairNextBtn.addEventListener('click', () => {
             moveToNextPair();
         });
     }
-    if (pairSubmitBtn) {
-        pairSubmitBtn.addEventListener('click', () => {
-            submitQuestionGenerationReview();
+    if (pairAddBtn) {
+        pairAddBtn.addEventListener('click', () => {
+            addQuestionPair();
         });
     }
     
