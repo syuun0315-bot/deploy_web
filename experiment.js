@@ -1711,12 +1711,7 @@ function showCurrentPair() {
 }
 
 function updateQuestionPairActionButton() {
-    const pairNextBtn = document.getElementById('pair-next-btn');
     const pairAddBtn = document.getElementById('pair-add-btn');
-    if (pairNextBtn) {
-        pairNextBtn.style.display = 'inline-block';
-        pairNextBtn.textContent = '다음 문제';
-    }
     if (pairAddBtn) {
         pairAddBtn.style.display = 'inline-block';
     }
@@ -2843,7 +2838,7 @@ function setReviewInstructionCondition2Page4() {
     if (!content) return;
     content.innerHTML = `
         <p>학습 세션 제한시간은 <strong>10분</strong>입니다.</p>
-        <p style="margin-top: 1em;">10분 안에 가능한 만큼 문제를 만드세요. (권장: 최소 4문제)</p>
+        <p style="margin-top: 1em;">10분 안에 최소 4문제 이상 만들어 보세요.</p>
         <p style="margin-top: 1em;">시간이 종료되면 자동으로 다음 단계로 이동합니다.</p>
         <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 학습 세션을 시작해 주세요.</strong></p>
     `;
@@ -2903,7 +2898,7 @@ function setupReviewInstruction() {
                 <li>해설 (지문을 바탕으로 답의 근거 설명)</li>
             </ol>
             <p style="margin-top: 1em;">문제 유형은 <strong>기억(사실)</strong> 또는 <strong>응용(추론)</strong> 중 하나를 선택하세요.</p>
-            <p>제한시간 <strong>10분</strong> 안에 가능한 만큼 문제를 만드세요. (권장: 최소 4문제)</p>
+            <p>제한시간 <strong>10분</strong> 안에 최소 4문제 이상 만들어 보세요.</p>
         `;
     } else if (condition === 3) {
         content.innerHTML = `
@@ -2917,7 +2912,7 @@ function setupReviewInstruction() {
             <p>이제 학습 세션을 시작합니다.</p>
             <p>지문을 읽고, <strong>AI 챗봇</strong>으로 궁금한 점을 질문하며, <strong>예상 시험 문제</strong>도 만들어 보세요.</p>
             <p style="margin-top: 1em;">각 문제에는 질문, 답, 해설을 작성할 수 있으며, 유형은 기억(사실) 또는 응용(추론) 중 하나를 선택합니다.</p>
-            <p>제한시간 <strong>10분</strong> 안에 가능한 만큼 문제를 만드세요. (권장: 최소 4문제)</p>
+            <p>제한시간 <strong>10분</strong> 안에 최소 4문제 이상 만들어 보세요.</p>
         `;
     }
 }
@@ -3583,10 +3578,6 @@ function developerModeGoToStage(stage) {
         setTimeout(() => setupPostSurvey(), 100);
     } else if (stage === 'demographics') {
         showStage('demographics');
-    } else if (stage === 'gifticon') {
-        showStage('gifticon');
-    } else if (stage === 'termination') {
-        showStage('termination');
     } else if (stage === 'completion') {
         showStage('completion');
     }
@@ -3637,8 +3628,6 @@ function updateActiveNavButton() {
         'post-survey-intro': 'nav-post-survey-intro',
         'post-survey': 'nav-post-survey',
         'demographics': 'nav-demographics',
-        'gifticon': 'nav-gifticon',
-        'termination': 'nav-termination',
         'completion': 'nav-completion'
     };
     
@@ -3688,8 +3677,6 @@ function setupDesignerNavigation() {
         'nav-post-survey-intro': 'post-survey-intro',
         'nav-post-survey': 'post-survey',
         'nav-demographics': 'demographics',
-        'nav-gifticon': 'gifticon',
-        'nav-termination': 'termination',
         'nav-completion': 'completion'
     };
     
@@ -4025,41 +4012,7 @@ document.addEventListener('DOMContentLoaded', () => {
         submitAllDataToBackend({ silent: true });
     });
     
-    // 기프티콘 완료 버튼
-    document.getElementById('gifticon-complete-btn').addEventListener('click', () => {
-        const gifticonOption = document.querySelector('input[name="gifticon-option"]:checked');
-        
-        if (!gifticonOption) {
-            alertRequiredResponse();
-            return;
-        }
-        
-        if (gifticonOption.value === 'phone') {
-            const phone = document.getElementById('gifticon-phone').value.trim();
-            if (!phone) {
-                alertRequiredResponse();
-                return;
-            }
-            experimentData.gifticon = {
-                option: 'phone',
-                phone: phone
-            };
-        } else {
-            experimentData.gifticon = {
-                option: 'decline'
-            };
-        }
-        
-        saveExperimentEvent({
-            page_name: 'gifticon',
-            block_name: 'gifticon',
-            response_value: JSON.stringify(experimentData.gifticon),
-            is_correct: null,
-        });
-        
-        showStage('completion');
-        submitAllDataToBackend({ silent: true });
-    });
+    // 기프티콘·참여종료 화면은 참가자 흐름에서 제거됨
     
     // 설문 다음 버튼
     document.getElementById('survey-next-btn').addEventListener('click', () => {
@@ -4215,13 +4168,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     // 질문+답+해설 쌍 다음 / 다음 단계 버튼
-    const pairNextBtn = document.getElementById('pair-next-btn');
     const pairAddBtn = document.getElementById('pair-add-btn');
-    if (pairNextBtn) {
-        pairNextBtn.addEventListener('click', () => {
-            moveToNextPair();
-        });
-    }
     if (pairAddBtn) {
         pairAddBtn.addEventListener('click', () => {
             addQuestionPair();

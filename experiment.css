@@ -401,8 +401,27 @@ h3 {
     overflow-y: auto;
     overflow-x: hidden;
 }
+
+#question-generation-mode .pair-input {
+    flex: 0 0 auto;
+    resize: vertical;
+    min-height: 3.5em;
+}
+
+#question-generation-mode #current-question {
+    min-height: 4.5em;
+}
+
+#question-generation-mode #current-answer,
+#question-generation-mode #current-explanation {
+    min-height: 5em;
+}
 #question-generation-mode .question-pair-toolbar {
     flex-shrink: 0;
+}
+
+#question-generation-mode .qg-session-hint {
+    text-align: center;
 }
 #question-generation-mode .question-pair-next-row {
     flex-shrink: 0;
@@ -462,7 +481,10 @@ h3 {
     font-size: 1em;
     font-family: inherit;
     resize: vertical;
-    flex: 1;
+}
+
+#question-generation-mode textarea {
+    flex: 0 0 auto;
 }
 
 /* 질문 생성 컨테이너 */
@@ -979,12 +1001,12 @@ h3 {
 #eligibility-screen,
 #experiment-guide-screen,
 #introduction-screen,
+#pre-jol-screen,
+#post-jol-screen,
 #review-instruction-screen,
 #math-preintro-screen,
 #distractor-instruction-screen,
-#post-survey-intro-screen,
-#gifticon-screen,
-#termination-screen {
+#post-survey-intro-screen {
     display: flex;
     align-items: flex-start;
     justify-content: center;
@@ -996,14 +1018,14 @@ h3 {
 #eligibility-screen .container,
 #experiment-guide-screen .container,
 #introduction-screen .container,
+#pre-jol-screen .container,
+#post-jol-screen .container,
 #review-instruction-screen .container,
 #math-preintro-screen .container,
 #distractor-instruction-screen .container,
-#post-survey-intro-screen .container,
-#gifticon-screen .container,
-#termination-screen .container {
+#post-survey-intro-screen .container {
     justify-content: flex-start;
-    align-items: flex-start;
+    align-items: center;
     padding-top: 40px;
     padding-bottom: 40px;
 }
@@ -1028,6 +1050,38 @@ h3 {
     font-size: 1.1em;
     margin-bottom: 30px;
     color: #333;
+}
+
+/* pre-JOL, post-JOL, 학습 안내: 지시문 가운데 정렬 */
+#pre-jol-screen .instruction-content,
+#post-jol-screen .instruction-content,
+#review-instruction-screen .instruction-content {
+    max-width: 720px;
+    margin-left: auto;
+    margin-right: auto;
+    text-align: center;
+}
+
+#pre-jol-screen .instruction-text,
+#post-jol-screen .instruction-text,
+#review-instruction-screen .instruction-text,
+#pre-jol-screen .post-survey-subtitle,
+#post-jol-screen .post-survey-subtitle,
+#post-jol-screen .post-survey-question {
+    text-align: center;
+}
+
+#pre-jol-screen .number-input-container,
+#post-jol-screen .number-input-container {
+    justify-content: center;
+}
+
+#pre-jol-screen .btn-primary,
+#post-jol-screen .btn-primary,
+#review-instruction-screen .btn-primary {
+    display: inline-block;
+    margin-left: auto;
+    margin-right: auto;
 }
 
 .instruction-text p {
