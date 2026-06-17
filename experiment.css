@@ -77,7 +77,44 @@ body {
     box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
 }
 
-/* 복습 안내 페이지(조건 2·4 마지막 페이지 등) 강조 문단 */
+/* 학습 안내 페이지 강조 문단 */
+#review-instruction-screen .instruction-text {
+    text-align: center;
+}
+
+.review-instruction-qg-types {
+    margin: 1.25em auto 0;
+    max-width: 680px;
+    text-align: center;
+    list-style-position: inside;
+}
+
+.review-instruction-qg-types li {
+    margin-bottom: 0.85em;
+    line-height: 1.65;
+}
+
+.review-instruction-qg-list {
+    margin: 0.5em auto 0;
+    padding-left: 1.5em;
+    line-height: 1.7;
+    max-width: 680px;
+    text-align: left;
+}
+
+.review-instruction-centered-list {
+    list-style-position: inside;
+    padding: 0;
+    margin: 0.65em auto 0;
+    max-width: 560px;
+    line-height: 1.75;
+    text-align: center;
+}
+
+.review-instruction-centered-list li {
+    margin-bottom: 0.35em;
+}
+
 #review-instruction-content .review-instruction-emphasis {
     font-size: 1.2rem;
     line-height: 1.6;
@@ -106,6 +143,23 @@ body {
     min-height: 0;
     height: auto;
     max-height: 100%;
+}
+
+.review-stage-bar {
+    flex-shrink: 0;
+    padding: 10px 20px;
+    background: #f0f7fc;
+    border-bottom: 1px solid #d6e9f8;
+}
+
+.review-stage-bar__hint {
+    max-width: 1200px;
+    margin: 0 auto;
+    font-size: 0.95em;
+    line-height: 1.55;
+    color: #2c3e50;
+    text-align: center;
+    word-break: keep-all;
 }
 
 /* 눈에 띄되 채도를 낮춘 붉은 톤 — 다음 단계 */
@@ -360,6 +414,7 @@ h3 {
 
 .review-right:has(#question-generation-mode[style*="display: block"]) {
     overflow: hidden;
+    min-height: 0;
 }
 
 .review-right.hidden {
@@ -388,18 +443,39 @@ h3 {
     height: calc(100% - 80px);
 }
 
-/* 질문 생성: 입력란만 스크롤, '다음 문제'는 항상 열 안에 보이게 */
+/* 질문 생성: 입력란만 스크롤, '질문 추가'는 열 하단 고정 */
 #question-generation-mode.review-mode {
-    height: 100% !important;
+    height: auto !important;
     overflow: hidden;
     min-height: 0;
     flex: 1 1 auto;
+    margin-top: 0;
 }
+
+.qg-action-footer {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 10px 0 0;
+    margin-top: auto;
+    border-top: 1px solid #e8ecef;
+    background: #fff;
+}
+
+.pair-field-label {
+    display: block;
+    font-weight: bold;
+    margin-bottom: 8px;
+    color: #2c3e50;
+}
+
 #question-generation-mode .pair-container {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    padding-bottom: 8px;
 }
 
 #question-generation-mode .pair-input {
@@ -409,42 +485,37 @@ h3 {
 }
 
 #question-generation-mode #current-question {
+    min-height: 4em;
+}
+
+#question-generation-mode #current-answer {
     min-height: 4.5em;
 }
 
-#question-generation-mode #current-answer,
-#question-generation-mode #current-explanation {
-    min-height: 5em;
+#question-generation-mode #current-explanation,
+#question-generation-mode .pair-input-explanation {
+    min-height: 8em;
+    height: 8em;
 }
+
+#question-generation-mode .pair-item {
+    margin-top: 14px;
+}
+
+#question-generation-mode .pair-item:first-child {
+    margin-top: 0;
+}
+
+#question-generation-mode .pair-item-explanation {
+    margin-bottom: 4px;
+}
+
 #question-generation-mode .question-pair-toolbar {
     flex-shrink: 0;
 }
 
 #question-generation-mode .qg-session-hint {
-    text-align: center;
-}
-#question-generation-mode .question-pair-next-row {
-    flex-shrink: 0;
-    margin-top: auto;
-    padding: 14px 16px 14px 0;
-    display: flex;
-    flex-direction: column;
-    justify-content: flex-end;
-    align-items: flex-end;
-    gap: 10px;
-    background: #fff;
-    border-top: 1px solid #e8ecef;
-    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.06);
-    position: sticky;
-    bottom: 0;
-    z-index: 5;
-}
-
-#question-generation-mode .question-pair-next-row .btn-primary {
-    min-width: 108px;
-    padding: 12px 20px;
-    font-size: 1rem;
-    font-weight: 600;
+    text-align: left;
 }
 
 #pair-submit-btn.btn-review-next-step {
@@ -1053,11 +1124,17 @@ h3 {
 }
 
 /* pre-JOL, post-JOL, 학습 안내, 실험 안내: 지시문 가운데 정렬 */
-#introduction-screen .instruction-content,
+#introduction-screen .instruction-content {
+    max-width: min(96vw, 1100px);
+    margin-left: auto;
+    margin-right: auto;
+    text-align: center;
+}
+
 #pre-jol-screen .instruction-content,
 #post-jol-screen .instruction-content,
 #review-instruction-screen .instruction-content {
-    max-width: 720px;
+    max-width: min(96vw, 900px);
     margin-left: auto;
     margin-right: auto;
     text-align: center;
@@ -1071,6 +1148,14 @@ h3 {
 #post-jol-screen .post-survey-subtitle,
 #post-jol-screen .post-survey-question {
     text-align: center;
+}
+
+#introduction-screen .instruction-text {
+    word-break: keep-all;
+}
+
+#introduction-screen .instruction-text strong {
+    font-weight: 700;
 }
 
 #introduction-screen .btn-primary,
@@ -1088,14 +1173,21 @@ h3 {
     margin-top: 20px;
 }
 
-#pre-jol-screen .jol-input-row .number-input-container {
+#review-instruction-screen .instruction-text,
+#review-instruction-content {
+    word-break: keep-all;
+}
+
+#pre-jol-screen .jol-input-row .number-input-container,
+#post-jol-screen .jol-input-row .number-input-container {
     justify-content: center;
     flex: none;
     width: auto;
     margin-top: 0;
 }
 
-#pre-jol-screen .jol-input-row .number-input-container input {
+#pre-jol-screen .jol-input-row .number-input-container input,
+#post-jol-screen .jol-input-row .number-input-container input {
     flex: none;
     width: 120px;
 }
@@ -1105,7 +1197,7 @@ h3 {
     justify-content: space-between;
     align-items: flex-start;
     gap: 24px;
-    max-width: 560px;
+    max-width: min(96vw, 900px);
     margin: 14px auto 0;
     font-size: 0.92em;
     color: #666;
@@ -1122,8 +1214,8 @@ h3 {
     flex: 1;
 }
 
-#post-jol-screen .number-input-container {
-    justify-content: center;
+#post-jol-screen .instruction-text {
+    text-align: center;
 }
 
 .instruction-text p {

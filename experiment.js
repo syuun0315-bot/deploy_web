@@ -208,8 +208,10 @@ function formatQgItemId(index) {
     return `qg_${String(index + 1).padStart(3, '0')}`;
 }
 
-function isQgPairComplete(question, answer, explanation) {
-    return isNonEmptyText(question) && isNonEmptyText(answer) && isNonEmptyText(explanation);
+function isQgPairComplete(question, answer, explanation, typeFact, typeUnderstand) {
+    const fieldsOk = isNonEmptyText(question) && isNonEmptyText(answer) && isNonEmptyText(explanation);
+    if (typeFact === undefined && typeUnderstand === undefined) return fieldsOk;
+    return fieldsOk && !!(typeFact || typeUnderstand);
 }
 
 function completeLearningSession() {
@@ -1131,7 +1133,7 @@ function countQgCompleteIncomplete() {
     let incomplete = 0;
     for (const p of pairs) {
         if (!p || !isNonEmptyText(p.question)) continue;
-        if (isQgPairComplete(p.question, p.answer, p.explanation)) complete += 1;
+        if (isQgPairComplete(p.question, p.answer, p.explanation, p.typeFact, p.typeUnderstand)) complete += 1;
         else incomplete += 1;
     }
     return { complete, incomplete };
@@ -1413,6 +1415,14 @@ function updateReviewStageBar() {
     syncReviewNextStepDockVisibility();
 }
 
+function syncQgActionFooterVisibility(condition) {
+    const footer = document.getElementById('qg-action-footer');
+    const questionMode = document.getElementById('question-generation-mode');
+    if (!footer) return;
+    const qgActive = questionMode && questionMode.style.display !== 'none';
+    footer.style.display = (qgActive && (condition === 2 || condition === 4 || condition == null)) ? 'flex' : 'none';
+}
+
 // 복습 단계 설정
 function setupReviewStage() {
     const condition = getExperimentCondition();
@@ -1533,15 +1543,6 @@ function setupReviewStage() {
             const chatMessages = document.getElementById('chat-messages');
             if (chatMessages) {
                 chatMessages.innerHTML = '';
-                // 환영 메시지 추가
-                const welcomeMsg = document.createElement('div');
-                welcomeMsg.className = 'chat-message ai';
-                setAssistantMessageBody(
-                    welcomeMsg,
-                    '안녕하세요! 박쥐 학습 자료를 바탕으로 궁금한 점을 자유롭게 질문해 주세요. 개념 설명, 예시, 비교, 배경지식 등 무엇이든 도와드리겠습니다.',
-                    { markdown: false }
-                );
-                chatMessages.appendChild(welcomeMsg);
             }
         }
     } else if (condition === 4) {
@@ -1563,16 +1564,8 @@ function setupReviewStage() {
             aiChatMode.style.display = 'block';
             // 챗봇 메시지 영역 초기화
             const chatMessages = document.getElementById('chat-messages');
-            if (chatMessages && chatMessages.children.length === 0) {
-                // 환영 메시지 추가
-                const welcomeMsg = document.createElement('div');
-                welcomeMsg.className = 'chat-message ai';
-                setAssistantMessageBody(
-                    welcomeMsg,
-                    '안녕하세요! 박쥐 학습 자료를 바탕으로 궁금한 점을 자유롭게 질문해 주세요. 개념 설명, 예시, 비교, 배경지식 등 무엇이든 도와드리겠습니다.',
-                    { markdown: false }
-                );
-                chatMessages.appendChild(welcomeMsg);
+            if (chatMessages) {
+                chatMessages.innerHTML = '';
             }
         }
         if (questionMode) {
@@ -1713,6 +1706,8 @@ function showCurrentPair() {
 
 function updateQuestionPairActionButton() {
     const pairAddBtn = document.getElementById('pair-add-btn');
+    const condition = getExperimentCondition();
+    syncQgActionFooterVisibility(condition);
     if (pairAddBtn) {
         pairAddBtn.style.display = 'inline-block';
     }
@@ -1747,7 +1742,7 @@ function persistCurrentPairToMemory() {
         explanation: fields.explanation,
         typeFact: fields.typeFact,
         typeUnderstand: fields.typeUnderstand,
-        isComplete: isQgPairComplete(fields.question, fields.answer, fields.explanation),
+        isComplete: isQgPairComplete(fields.question, fields.answer, fields.explanation, fields.typeFact, fields.typeUnderstand),
     };
 
     if (!experimentData.review.pairs) experimentData.review.pairs = [];
@@ -1799,6 +1794,26 @@ function saveAllQuestionGenerationPairs(options) {
     }
 }
 
+function validateCurrentPairForAdd() {
+    const fields = readCurrentPairFields();
+    const hasType = fields.typeFact || fields.typeUnderstand;
+    if (hasType && isNonEmptyText(fields.question) && isNonEmptyText(fields.answer) && isNonEmptyText(fields.explanation)) {
+        return true;
+    }
+    alertRequiredResponse();
+    if (!hasType) {
+        const firstType = document.getElementById('question-type-fact') || document.getElementById('question-type-understand');
+        if (firstType) firstType.focus();
+    } else if (!isNonEmptyText(fields.question) && fields.elements.currentQuestion) {
+        fields.elements.currentQuestion.focus();
+    } else if (!isNonEmptyText(fields.answer) && fields.elements.currentAnswer) {
+        fields.elements.currentAnswer.focus();
+    } else if (!isNonEmptyText(fields.explanation) && fields.elements.currentExplanation) {
+        fields.elements.currentExplanation.focus();
+    }
+    return false;
+}
+
 function validateAndSaveCurrentPair() {
     const fields = readCurrentPairFields();
     if (!isNonEmptyText(fields.question)) {
@@ -1821,6 +1836,7 @@ function moveToNextPair() {
 }
 
 function addQuestionPair() {
+    if (!validateCurrentPairForAdd()) return;
     validateAndSaveCurrentPair();
     experimentData.review.currentPairIndex = (experimentData.review.currentPairIndex || 0) + 1;
     showCurrentPair();
@@ -2112,6 +2128,8 @@ function showQuestion(index) {
 
 // 사후질문 관련 변수
 let currentPostSurveyIndex = 0;
+const SURVEY_QUESTION_COUNT = 7;
+
 let currentSurveyIndex = 0;
 
 // 설문 설정
@@ -2212,16 +2230,6 @@ function setupSurvey() {
                 maxLabel: '매우 어려웠다'
             }
         },
-        {
-            number: 8,
-            type: 'number',
-            instruction: '다음 질문을 읽고, 해당하는 정도에 체크해주세요.',
-            question:
-                '잠시 후, 방금 읽은 지문에 대한 최종 시험을 보게 됩니다. 지금 시험을 본다면 몇 %의 문제를 맞힐 수 있을 것 같나요?',
-            subtitle: '0~100 사이에서 선택해주세요.',
-            min: 0,
-            max: 100
-        }
     ];
     
     // 모든 질문 생성 (숨김 처리)
@@ -2287,31 +2295,6 @@ function setupSurvey() {
             nextBtn.style.opacity = '1';
             nextBtn.disabled = false;
         }
-        
-        // 숫자 입력 필드에 숫자만 입력되도록 제한
-        const numberInput8 = document.getElementById('survey-q8');
-        [numberInput8].forEach((input) => {
-            if (input) {
-                input.addEventListener('input', (e) => {
-                    e.target.value = e.target.value.replace(/[^0-9]/g, '');
-                    const num = parseInt(e.target.value);
-                    if (!isNaN(num)) {
-                        if (num > 100) {
-                            e.target.value = '100';
-                        } else if (num < 0) {
-                            e.target.value = '0';
-                        }
-                    }
-                });
-                
-                input.addEventListener('keypress', (e) => {
-                    const char = String.fromCharCode(e.which);
-                    if (!/[0-9]/.test(char)) {
-                        e.preventDefault();
-                    }
-                });
-            }
-        });
     }, 100);
 }
 
@@ -2322,7 +2305,7 @@ function showSurveyQuestion(index) {
 
     clearSurveyValidationMsg();
 
-    const totalQuestions = 8;
+    const totalQuestions = SURVEY_QUESTION_COUNT;
     if (index < 0 || index >= totalQuestions) return;
     
     // 모든 질문 숨기기
@@ -2398,16 +2381,11 @@ function showSurveyValidationMsg(text) {
     }
 }
 
-/** 설문 현재 문항(index 0~7) 응답 완료 여부 */
+/** 설문 현재 문항(index 0~6) 응답 완료 여부 */
 function validateSurveyStep(index) {
     const qNum = index + 1;
-    if (qNum >= 1 && qNum <= 7) {
+    if (qNum >= 1 && qNum <= SURVEY_QUESTION_COUNT) {
         return !!document.querySelector(`input[name="survey-q${qNum}"]:checked`);
-    }
-    if (qNum === 8) {
-        const inp = document.getElementById('survey-q8');
-        const v = inp ? parseInt(String(inp.value || '').trim(), 10) : NaN;
-        return !isNaN(v) && v >= 0 && v <= 100;
     }
     return true;
 }
@@ -2819,7 +2797,89 @@ function stopTimer(timerId) {
     }
 }
 
-// 조건 2 학습 안내 — 문제 예시 (기억)
+const LEARNING_INSTRUCTION_INTRO = `
+    <p>지금부터 여러분은 '박쥐'에 대한 지문을 10분 동안 학습하게 됩니다.</p>
+    <p style="margin-top: 1em;">이후 최종 시험에서는 학습한 지문에 관한 문제를 풀게 됩니다.</p>
+`;
+
+const AI_INSTRUCTION_HTML = `
+    <p>지문을 읽는 동안 페이지에 제공된 <strong>AI 챗봇</strong>을 활용할 수 있습니다.</p>
+    <p style="margin-top: 1em;">AI 챗봇은 지문을 중심으로<br>ChatGPT처럼 자유롭게 질문할 수 있게 설정되어 있습니다.</p>
+    <p>단, 실험 페이지 외부의 다른 AI 사용은 금지합니다.</p>
+`;
+
+const AI_QG_INSTRUCTION_HTML = `
+    <p>이때 여러분은 <strong>AI 챗봇</strong>을 사용할 수 있습니다.</p>
+    <p style="margin-top: 1em;">페이지에 제공된 AI 챗봇을 활용해<br>지문 내용에 대해 질문하고 탐색할 수 있습니다.</p>
+    <p style="margin-top: 1em;">AI 챗봇은 지문을 중심으로<br>ChatGPT처럼 자유롭게 질문할 수 있게 설정되어 있습니다.</p>
+    <p>단, 실험 페이지 외부의 다른 AI 사용은 금지합니다.</p>
+`;
+
+function buildSelfQgInstructionHtml() {
+    return `
+        <p>단, 지문을 읽으며<br>최종 시험에 나올 만한 <strong>예상 문제</strong>를 직접 만들어야 합니다.</p>
+        <p style="margin-top: 1em;">문제 유형은 두 종류로 나뉩니다.</p>
+        <ul class="review-instruction-centered-list review-instruction-qg-types">
+            <li>지문의 내용을 그대로 확인하는 <strong>기억(사실) 문제 2문제</strong></li>
+            <li>지문에 나온 개념을 활용하여 추론해야 하는 <strong>응용(추론) 문제 2문제</strong></li>
+        </ul>
+        <p style="margin-top: 1.25em;">각 문제에 대해 반드시 다음을 함께 작성하세요.</p>
+        <ol class="review-instruction-centered-list">
+            <li>문제</li>
+            <li>답 (간단하게 핵심만)</li>
+            <li>해설 (답의 근거를 지문을 바탕으로 충분히 설명)</li>
+        </ol>
+        <p style="margin-top: 1em;">문제는 객관식 또는 주관식 등<br>다양한 형태로 자유롭게 만들 수 있습니다.</p>
+    `;
+}
+
+const LEARNING_START_CTA =
+    `<p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 학습을 시작해주세요.</strong></p>`;
+
+const LEARNING_SESSION_START_CTA =
+    `<p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 학습 세션을 시작해 주세요.</strong></p>`;
+
+// 모든 조건 공통 — 학습 안내 1페이지
+function setReviewInstructionIntroPage() {
+    const content = document.getElementById('review-instruction-content');
+    if (!content) return;
+    content.innerHTML = LEARNING_INSTRUCTION_INTRO;
+}
+
+// 조건 1(Self-study) — 학습 시작 안내
+function setReviewInstructionSelfStudyStartPage() {
+    const content = document.getElementById('review-instruction-content');
+    if (!content) return;
+    content.innerHTML = `
+        <p>이제 학습을 시작합니다.</p>
+        <p style="margin-top: 1em;">제한 시간은 <strong>10분</strong>이며,<br>화면 상단에서 남은 시간을 확인할 수 있습니다.</p>
+        <p>시간이 종료되면 자동으로 다음 단계로 이동합니다.</p>
+        ${LEARNING_START_CTA}
+    `;
+}
+
+// 조건 2·4 Self-QG 상세 안내
+function setReviewInstructionSelfQgDetailPage() {
+    const content = document.getElementById('review-instruction-content');
+    if (!content) return;
+    content.innerHTML = buildSelfQgInstructionHtml();
+}
+
+// 조건 4(AI-QG) — AI 챗봇 안내 (QG 안내 다음 페이지)
+function setReviewInstructionAiQgDetailPage() {
+    const content = document.getElementById('review-instruction-content');
+    if (!content) return;
+    content.innerHTML = AI_QG_INSTRUCTION_HTML;
+}
+
+// 조건 3(AI-study) — AI 챗봇 안내
+function setReviewInstructionAiDetailPage() {
+    const content = document.getElementById('review-instruction-content');
+    if (!content) return;
+    content.innerHTML = AI_INSTRUCTION_HTML;
+}
+
+// 조건 2·4 Self-QG — 문제 예시 (기억)
 function setReviewInstructionCondition2Page2() {
     const content = document.getElementById('review-instruction-content');
     if (!content) return;
@@ -2848,107 +2908,51 @@ function setReviewInstructionCondition2Page3() {
     `;
 }
 
-// 조건 2·4 학습 안내 — 마지막 안내
-function setReviewInstructionCondition2Page4() {
+// 조건 2·4 Self-QG — 학습 시작 안내
+function setReviewInstructionQgLearningStartPage() {
+    const content = document.getElementById('review-instruction-content');
+    if (!content) return;
+    content.innerHTML = `
+        <p>이제 학습을 시작합니다.</p>
+        <p style="margin-top: 1em;">제한 시간은 <strong>10분</strong>이며,<br>화면 상단에서 남은 시간을 확인할 수 있습니다.</p>
+        <p>시간이 종료되면 자동으로 다음 단계로 이동합니다.</p>
+        ${LEARNING_START_CTA}
+    `;
+}
+
+// 조건 3(AI-study) — 학습 세션 시작 안내
+function setReviewInstructionAiSessionStartPage() {
     const content = document.getElementById('review-instruction-content');
     if (!content) return;
     content.innerHTML = `
         <p>학습 세션 제한시간은 <strong>10분</strong>입니다.</p>
-        <p style="margin-top: 1em;">10분 안에 최소 4문제 이상 만들어 보세요.</p>
-        <p style="margin-top: 1em;">시간이 종료되면 자동으로 다음 단계로 이동합니다.</p>
-        <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 학습 세션을 시작해 주세요.</strong></p>
+        <p style="margin-top: 1em;">화면 상단에서 남은 시간을 확인할 수 있습니다.</p>
+        <p>시간이 종료되면 자동으로 다음 단계로 이동합니다.</p>
+        ${LEARNING_SESSION_START_CTA}
     `;
 }
 
-// 조건 4 학습 안내 — AI 챗봇 안내
-function setReviewInstructionCondition4Page2() {
-    const content = document.getElementById('review-instruction-content');
-    if (!content) return;
-    content.innerHTML = `
-        <p>학습 세션에서 지문을 읽으며 학습합니다.</p>
-        <p>또한 <strong>AI 챗봇</strong>을 사용해 지문 내용에 대해 질문하고 탐색할 수 있습니다.</p>
-        <p>AI 챗봇은 학습 자료를 중심으로 하되, ChatGPT처럼 자유롭게 질문할 수 있습니다.</p>
-        <p>실험 페이지 외부의 다른 AI 사용은 삼가 주세요.</p>
-        <p style="margin-top: 1em;">학습 세션 제한시간은 <strong>10분</strong>이며, 시간 종료 시 자동으로 다음 단계로 이동합니다.</p>
-        <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 학습 세션을 시작해 주세요.</strong></p>
-    `;
-}
-
-// 조건 3 학습 안내 — AI 챗봇 (두 번째 페이지)
-function setReviewInstructionCondition3Page2() {
-    const content = document.getElementById('review-instruction-content');
-    if (!content) return;
-    content.innerHTML = `
-        <p>학습 세션에서 지문을 읽으며 학습합니다.</p>
-        <p>또한 <strong>AI 챗봇</strong>을 사용해 지문 내용에 대해 질문하고 탐색할 수 있습니다.</p>
-        <p style="margin-top: 1em;">학습 세션 제한시간은 <strong>10분</strong>이며, 시간 종료 시 자동으로 다음 단계로 이동합니다.</p>
-        <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 학습 세션을 시작해 주세요.</strong></p>
-    `;
-}
-
-// 학습 안내 내용 설정 (조건에 따라)
+// 학습 안내 내용 설정 (조건에 따라 — 공통 도입 후 1페이지부터)
 function setupReviewInstruction() {
     const condition = getExperimentCondition();
     if (condition != null) experimentData.condition = condition;
-    const content = document.getElementById('review-instruction-content');
-    if (!content) return;
-    if (condition === 2 || condition === 3 || condition === 4) reviewInstructionStep = 1;
-    else reviewInstructionStep = 0;
-
-    if (condition === 1) {
-        content.innerHTML = `
-            <p>이제 학습 세션을 시작합니다.</p>
-            <p>화면에 제시된 지문을 읽으며 학습해 주세요.</p>
-            <p style="margin-top: 1em;">학습 세션 제한시간은 <strong>10분</strong>입니다. 화면 상단에서 남은 시간을 확인할 수 있습니다.</p>
-            <p>시간이 종료되면 자동으로 다음 단계로 이동합니다.</p>
-            <p style="margin-top: 1em;"><strong>준비되었으면 '다음'을 눌러 학습 세션을 시작해 주세요.</strong></p>
-        `;
-    } else if (condition === 2) {
-        content.innerHTML = `
-            <p>이제 학습 세션을 시작합니다.</p>
-            <p>지문을 읽으며, 최종시험에 나올 만한 <strong>예상 문제</strong>를 직접 만들어 보세요.</p>
-            <p style="margin-top: 1em;">각 문제에는 다음을 작성할 수 있습니다:</p>
-            <ol style="margin: 0.5em 0 0 1.25em; line-height: 1.6;">
-                <li>질문</li>
-                <li>답 (간단하게 핵심만)</li>
-                <li>해설 (지문을 바탕으로 답의 근거 설명)</li>
-            </ol>
-            <p style="margin-top: 1em;">문제 유형은 <strong>기억(사실)</strong> 또는 <strong>응용(추론)</strong> 중 하나를 선택하세요.</p>
-            <p>제한시간 <strong>10분</strong> 안에 최소 4문제 이상 만들어 보세요.</p>
-        `;
-    } else if (condition === 3) {
-        content.innerHTML = `
-            <p>이제 학습 세션을 시작합니다.</p>
-            <p>지문을 읽으며 학습하고, <strong>AI 챗봇</strong>을 통해 궁금한 점을 질문할 수 있습니다.</p>
-            <p style="margin-top: 1em;">AI 챗봇은 학습 자료를 중심으로 답변합니다. 실험 페이지 외부 AI 사용은 삼가 주세요.</p>
-            <p>학습 세션 제한시간은 <strong>10분</strong>입니다.</p>
-        `;
-    } else if (condition === 4) {
-        content.innerHTML = `
-            <p>이제 학습 세션을 시작합니다.</p>
-            <p>지문을 읽고, <strong>AI 챗봇</strong>으로 궁금한 점을 질문하며, <strong>예상 시험 문제</strong>도 만들어 보세요.</p>
-            <p style="margin-top: 1em;">각 문제에는 질문, 답, 해설을 작성할 수 있으며, 유형은 기억(사실) 또는 응용(추론) 중 하나를 선택합니다.</p>
-            <p>제한시간 <strong>10분</strong> 안에 최소 4문제 이상 만들어 보세요.</p>
-        `;
-    }
+    reviewInstructionStep = 1;
+    setReviewInstructionIntroPage();
 }
 
-// 학습 안내 단계로 이동
+// pre-JOL 이후 → 학습 안내(조건별) → 학습 세션
 function startReviewStage() {
-    if (experimentData.condition) {
-        setupReviewInstruction();
-        showStage('review-instruction');
-        resetReviewInstructionNextButton();
-        saveExperimentEvent({
-            page_name: 'learning_instruction',
-            block_name: 'learning_instruction_enter',
-            event_type: 'learning_instruction_enter',
-            metadata: withProtocolMetadata({}),
-        });
-    } else {
-        showStage('review');
-        setupReviewStage();
-    }
+    const condition = getExperimentCondition();
+    if (condition != null) experimentData.condition = condition;
+    setupReviewInstruction();
+    showStage('review-instruction');
+    resetReviewInstructionNextButton();
+    saveExperimentEvent({
+        page_name: 'learning_instruction',
+        block_name: 'learning_instruction_enter',
+        event_type: 'learning_instruction_enter',
+        metadata: withProtocolMetadata({}),
+    });
 }
 
 function beginLearningSessionFromInstruction() {
@@ -3934,65 +3938,75 @@ document.addEventListener('DOMContentLoaded', () => {
     // 학습 안내 다음 버튼
     document.getElementById('review-instruction-next-btn').addEventListener('click', () => {
         const condition = getExperimentCondition();
-        const reviewNextBtn = document.getElementById('review-instruction-next-btn');
-        const content = document.getElementById('review-instruction-content');
-        // 조건 2(지문+질문생성): 1페이지 → 2페이지(객관식 예시) → 3페이지(주관식 예시) → 4페이지 → 복습 화면
-        if (condition === 2 && reviewInstructionStep === 1) {
+        // 공통 1페이지(도입) 이후 조건별 분기
+        if (reviewInstructionStep === 1) {
             reviewInstructionStep = 2;
-            setReviewInstructionCondition2Page2();
+            if (condition === 1) setReviewInstructionSelfStudyStartPage();
+            else if (condition === 2) setReviewInstructionSelfQgDetailPage();
+            else if (condition === 3) setReviewInstructionAiDetailPage();
+            else if (condition === 4) setReviewInstructionSelfQgDetailPage();
             return;
         }
+        // 조건 1(Self-study): 2(시작) → 학습 세션
+        if (condition === 1 && reviewInstructionStep === 2) {
+            beginLearningSessionFromInstruction();
+            return;
+        }
+        // 조건 2(Self-QG): 2(상세) → 3(예시1) → 4(예시2) → 5(시작) → 학습 세션
         if (condition === 2 && reviewInstructionStep === 2) {
             reviewInstructionStep = 3;
-            setReviewInstructionCondition2Page3();
+            setReviewInstructionCondition2Page2();
             return;
         }
         if (condition === 2 && reviewInstructionStep === 3) {
             reviewInstructionStep = 4;
-            setReviewInstructionCondition2Page4();
+            setReviewInstructionCondition2Page3();
             return;
         }
         if (condition === 2 && reviewInstructionStep === 4) {
+            reviewInstructionStep = 5;
+            setReviewInstructionQgLearningStartPage();
+            return;
+        }
+        if (condition === 2 && reviewInstructionStep === 5) {
             beginLearningSessionFromInstruction();
             return;
         }
-        // 조건 3(AI 재학습): 첫 페이지에서 다음 → 두 번째 페이지로(바로 다음 가능), 두 번째 페이지에서 다음 → 복습 화면으로
-        if (condition === 3 && reviewInstructionStep === 1) {
-            reviewInstructionStep = 2;
-            setReviewInstructionCondition3Page2();
-            resetReviewInstructionNextButton();
-            return;
-        }
+        // 조건 3(AI-study): 2(AI) → 3(시작) → 학습 세션
         if (condition === 3 && reviewInstructionStep === 2) {
+            reviewInstructionStep = 3;
+            setReviewInstructionAiSessionStartPage();
+            return;
+        }
+        if (condition === 3 && reviewInstructionStep === 3) {
             beginLearningSessionFromInstruction();
             return;
         }
-        // 조건 4(AI+질문생성): 1페이지 → 2페이지(객관식 예시) → 3페이지(주관식 예시) → 4페이지(AI 챗봇 안내) → 5페이지(시간 제한 없음) → 복습 화면
-        if (condition === 4 && reviewInstructionStep === 1) {
-            reviewInstructionStep = 2;
-            setReviewInstructionCondition2Page2();
-            return;
-        }
+        // 조건 4(AI-QG): 2(QG) → 3(AI) → 4(예시1) → 5(예시2) → 6(시작) → 학습 세션
         if (condition === 4 && reviewInstructionStep === 2) {
             reviewInstructionStep = 3;
-            setReviewInstructionCondition2Page3();
+            setReviewInstructionAiQgDetailPage();
             return;
         }
         if (condition === 4 && reviewInstructionStep === 3) {
             reviewInstructionStep = 4;
-            setReviewInstructionCondition4Page2();
+            setReviewInstructionCondition2Page2();
             return;
         }
         if (condition === 4 && reviewInstructionStep === 4) {
             reviewInstructionStep = 5;
-            setReviewInstructionCondition2Page4();
+            setReviewInstructionCondition2Page3();
             return;
         }
         if (condition === 4 && reviewInstructionStep === 5) {
+            reviewInstructionStep = 6;
+            setReviewInstructionQgLearningStartPage();
+            return;
+        }
+        if (condition === 4 && reviewInstructionStep === 6) {
             beginLearningSessionFromInstruction();
             return;
         }
-        beginLearningSessionFromInstruction();
     });
     
     // 설문 안내에서 설문으로 가는 '다음' 버튼
@@ -4059,7 +4073,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         clearSurveyValidationMsg();
-        if (currentSurveyIndex < 7) {
+        if (currentSurveyIndex < SURVEY_QUESTION_COUNT - 1) {
             logSurveyQuestionResponse(currentSurveyIndex + 1);
             showSurveyQuestion(currentSurveyIndex + 1);
         }
@@ -4072,19 +4086,14 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         clearSurveyValidationMsg();
-        logSurveyQuestionResponse(8);
+        logSurveyQuestionResponse(SURVEY_QUESTION_COUNT);
         // 모든 답변 수집
         const answers = {};
         
-        // 질문 1-7: 7점 척도
-        for (let i = 1; i <= 7; i++) {
+        for (let i = 1; i <= SURVEY_QUESTION_COUNT; i++) {
             const q = document.querySelector(`input[name="survey-q${i}"]:checked`);
             if (q) answers[`q${i}`] = q.value;
         }
-        
-        // 질문 8: 숫자 입력
-        const q8 = document.getElementById('survey-q8');
-        if (q8) answers.q8 = q8.value;
         
         // 데이터 저장
         experimentData.survey.answers = answers;
