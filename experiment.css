@@ -1627,28 +1627,6 @@ h3 {
     background: #c0392b !important;
 }
 
-/* 개발자 모드 토글 버튼 (항상 표시) */
-.dev-mode-toggle {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    z-index: 9999;
-    padding: 10px 16px;
-    background: #2c3e50;
-    color: #ecf0f1;
-    border: none;
-    border-radius: 8px;
-    font-size: 0.9em;
-    font-weight: bold;
-    cursor: pointer;
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
-    transition: background 0.2s, transform 0.2s;
-}
-.dev-mode-toggle:hover {
-    background: #34495e;
-    transform: scale(1.05);
-}
-
 /* 개발자 모드 네비게이션 */
 .designer-only {
     display: none;

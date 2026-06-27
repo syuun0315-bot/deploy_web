@@ -790,7 +790,7 @@ function bindExperimentClickCounterOnce() {
             if (!experimentData.participantId) return;
             const t = e.target;
             if (t && typeof t.closest === 'function') {
-                if (t.closest('#dev-mode-toggle-btn') || t.closest('#designer-nav')) return;
+                if (t.closest('#designer-nav')) return;
             }
             experimentData.clickCount = (experimentData.clickCount || 0) + 1;
         },
@@ -1282,7 +1282,7 @@ const saveExperimentData = saveExperimentEvent;
 /** 전체 제출 별칭 */
 const submitExperimentData = submitAllDataToBackend;
 
-// 개발자 모드 (단축키: Ctrl+Shift+D 또는 우측 하단 버튼)
+// 개발자 모드 (단축키: Ctrl+Shift+D)
 let designerMode = false;
 let designerCondition = null; // 개발자 모드에서 선택한 조건
 
@@ -3728,14 +3728,6 @@ function setupDesignerNavigation() {
             if (designerMode) {
                 developerModeGoToStage(pageSelect.value);
             }
-        });
-    }
-    
-    // 개발자 모드 토글 버튼 (항상 표시)
-    const toggleBtn = document.getElementById('dev-mode-toggle-btn');
-    if (toggleBtn) {
-        toggleBtn.addEventListener('click', function() {
-            toggleDesignerMode();
         });
     }
 }
